@@ -3,14 +3,12 @@ import sqlite3
 import jwt
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, render_template_string, request, jsonify, redirect, url_for, send_file
+from flask import Flask, render_template_string, request, jsonify, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
 import re
 import requests
 import csv
-from io import StringIO, BytesIO
-import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from io import StringIO
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 
@@ -160,15 +158,6 @@ def init_db():
         FOREIGN KEY(miniatura_id) REFERENCES miniaturas(id)
     )''')
     
-    c.execute('''CREATE TABLE IF NOT EXISTS fila_espera (
-        id INTEGER PRIMARY KEY, 
-        user_id INTEGER, 
-        miniatura_id INTEGER, 
-        created_at TEXT, 
-        FOREIGN KEY(user_id) REFERENCES users(id), 
-        FOREIGN KEY(miniatura_id) REFERENCES miniaturas(id)
-    )''')
-    
     c.execute('SELECT COUNT(*) FROM users')
     if c.fetchone()[0] == 0:
         c.execute('INSERT INTO users (name, email, password, phone, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -235,83 +224,9 @@ def login():
             return response
         return redirect(url_for('login'))
     
-    return '''<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JG MINIS - Login</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-</head>
-<body class="bg-gradient-to-br from-slate-900 via-blue-900 to-black min-h-screen flex items-center justify-center">
-<div class="w-full max-w-md">
-<div class="bg-gradient-to-b from-slate-800 to-black rounded-2xl shadow-2xl overflow-hidden border-2 border-red-600">
-<div class="bg-gradient-to-r from-blue-700 via-blue-900 to-black p-8 text-center border-b-2 border-red-600">
-<div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600 overflow-hidden">
-<img src="''' + LOGO_URL + '''" alt="Logo" class="w-full h-full object-contain p-2">
-</div>
-<h2 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">JG MINIS</h2>
-<p class="text-blue-300 font-semibold">Portal de Miniaturas Premium</p>
-</div>
-<div class="p-8">
-<div class="flex gap-4 mb-6 border-b border-slate-600">
-<button class="nav-tab active pb-4 px-4 font-bold text-red-500 border-b-2 border-red-500 cursor-pointer" onclick="switchTab('login')">Login</button>
-<button class="nav-tab pb-4 px-4 font-bold text-slate-400 cursor-pointer hover:text-blue-400" onclick="switchTab('register')">Cadastro</button>
-</div>
-<div id="login" class="tab-content">
-<form method="POST" action="/login">
-<div class="mb-4">
-<label class="block text-slate-300 font-bold mb-2">Email</label>
-<input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500" required>
-</div>
-<div class="mb-6">
-<label class="block text-slate-300 font-bold mb-2">Senha</label>
-<input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500" required>
-</div>
-<button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg hover:shadow-2xl">Entrar</button>
-</form>
-<hr class="my-4 border-slate-600">
-<div class="text-xs text-slate-400">
-<p><strong>Admin:</strong> admin@example.com / admin123</p>
-</div>
-</div>
-<div id="register" class="tab-content hidden">
-<form method="POST" action="/register">
-<div class="mb-4">
-<label class="block text-slate-300 font-bold mb-2">Nome</label>
-<input type="text" name="name" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required>
-</div>
-<div class="mb-4">
-<label class="block text-slate-300 font-bold mb-2">Email</label>
-<input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required>
-</div>
-<div class="mb-4">
-<label class="block text-slate-300 font-bold mb-2">Telefone (11) xxxxx-xxxx</label>
-<input type="tel" name="phone" placeholder="(11) 99999-9999" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required>
-</div>
-<div class="mb-4">
-<label class="block text-slate-300 font-bold mb-2">Senha (min 8)</label>
-<input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required>
-</div>
-<div class="mb-6">
-<label class="block text-slate-300 font-bold mb-2">Confirme a Senha</label>
-<input type="password" name="confirm_password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required>
-</div>
-<button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Cadastrar</button>
-</form>
-</div>
-</div>
-</div>
-</div>
-<script>
-function switchTab(t) {
-  document.querySelectorAll(".tab-content").forEach(e => e.classList.add("hidden"));
-  document.getElementById(t).classList.remove("hidden");
-}
-</script>
-</body>
-</html>'''
+    html = '''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-br from-slate-900 via-blue-900 to-black min-h-screen flex items-center justify-center"><div class="w-full max-w-md"><div class="bg-gradient-to-b from-slate-800 to-black rounded-2xl shadow-2xl overflow-hidden border-2 border-red-600"><div class="bg-gradient-to-r from-blue-700 via-blue-900 to-black p-8 text-center border-b-2 border-red-600"><div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600 overflow-hidden"><img src="''' + LOGO_URL + '''" alt="Logo" class="w-full h-full object-contain p-2"></div><h2 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">JG MINIS</h2><p class="text-blue-300 font-semibold">Portal de Miniaturas Premium</p></div><div class="p-8"><div class="flex gap-4 mb-6 border-b border-slate-600"><button class="nav-tab active pb-4 px-4 font-bold text-red-500 border-b-2 border-red-500 cursor-pointer" onclick="switchTab('login')">Login</button><button class="nav-tab pb-4 px-4 font-bold text-slate-400 cursor-pointer hover:text-blue-400" onclick="switchTab('register')">Cadastro</button></div><div id="login" class="tab-content"><form method="POST" action="/login"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">Senha</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Entrar</button></form><hr class="my-4 border-slate-600"><p class="text-xs text-slate-400"><strong>Admin:</strong> admin@example.com / admin123</p></div><div id="register" class="tab-content hidden"><form method="POST" action="/register"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Nome</label><input type="text" name="name" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Telefone</label><input type="tel" name="phone" placeholder="(11) 99999-9999" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Senha</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">Confirme Senha</label><input type="password" name="confirm_password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Cadastrar</button></form></div></div></div></div><script>function switchTab(t){document.querySelectorAll(".tab-content").forEach(e=>e.classList.add("hidden"));document.getElementById(t).classList.remove("hidden");}</script></body></html>'''
+    return html
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -357,149 +272,61 @@ def index():
     html = ''
     for m in miniaturas:
         is_esgotado = m[4] <= 0
-        status_text = 'ESGOTADO' if is_esgotado else f'Em Estoque: {m[4]}'
+        status = 'ESGOTADO' if is_esgotado else f'Em Estoque: {m[4]}'
         
         if is_esgotado:
-            html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-red-600 overflow-hidden">
-                <div class="bg-black h-48 flex items-center justify-center relative overflow-hidden">
-                    <img src="{m[1]}" class="w-full h-full object-cover opacity-50" alt="{m[2]}" onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'; this.innerHTML='ERRO'">
-                    <div class="absolute top-3 right-3 bg-red-600 text-white px-3 py-1 rounded-full text-sm font-bold">{status_text}</div>
-                </div>
-                <div class="p-4">
-                    <h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3>
-                    <p class="text-sm text-slate-400 mb-2">Chegada: {m[3]}</p>
-                    <p class="text-sm text-slate-400 mb-3">{m[6]}</p>
-                    <span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
-                </div>
-            </div>'''
+            html += f'<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-red-600 overflow-hidden"><div class="bg-black h-48 flex items-center justify-center relative overflow-hidden"><img src="{m[1]}" class="w-full h-full object-cover opacity-50" alt="{m[2]}" onerror="this.style.background=\'linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)\'"><div class="absolute top-3 right-3 bg-red-600 text-white px-3 py-1 rounded-full text-sm font-bold">{status}</div></div><div class="p-4"><h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3><p class="text-sm text-slate-400 mb-2">Chegada: {m[3]}</p><p class="text-sm text-slate-400 mb-3">{m[6]}</p><span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span></div></div>'
         else:
-            html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 overflow-hidden">
-                <div class="bg-black h-48 flex items-center justify-center relative overflow-hidden">
-                    <img src="{m[1]}" class="w-full h-full object-cover" alt="{m[2]}" onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'; this.innerHTML='ERRO'">
-                    <div class="absolute top-3 right-3 bg-green-600 text-white px-3 py-1 rounded-full text-sm font-bold">{status_text}</div>
-                </div>
-                <div class="p-4">
-                    <h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3>
-                    <p class="text-sm text-slate-400 mb-2">Chegada: {m[3]}</p>
-                    <p class="text-sm text-slate-400 mb-3">{m[6]}</p>
-                    <div class="flex justify-between items-center gap-2">
-                        <span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
-                        <button onclick="abrirConfirmacao({m[0]}, \'{m[2]}\', {m[5]}, {m[4]}, {m[7]})" class="bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700 text-white font-bold px-4 py-2 rounded-lg">Reservar</button>
-                    </div>
-                </div>
-            </div>'''
+            html += f'<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 overflow-hidden"><div class="bg-black h-48 flex items-center justify-center relative overflow-hidden"><img src="{m[1]}" class="w-full h-full object-cover" alt="{m[2]}" onerror="this.style.background=\'linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)\'"><div class="absolute top-3 right-3 bg-green-600 text-white px-3 py-1 rounded-full text-sm font-bold">{status}</div></div><div class="p-4"><h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3><p class="text-sm text-slate-400 mb-2">Chegada: {m[3]}</p><p class="text-sm text-slate-400 mb-3">{m[6]}</p><div class="flex justify-between items-center gap-2"><span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span><button onclick="abrirConfirmacao({m[0]}, '\''{m[2]}'\'', {m[5]}, {m[4]}, {m[7]})" class="bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold px-4 py-2 rounded-lg">Reservar</button></div></div></div>'
     
-    home_html = '''<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>JG MINIS</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-</head>
-<body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen">
-<nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50">
-<div class="container mx-auto px-4 py-4 flex justify-between items-center">
-<span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span>
-<div class="flex gap-4">
-<a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Minhas Reservas</a>
-''' + ('<a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a>' if request.user.get('is_admin') else '') + '''
-<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a>
-</div>
-</div>
-</nav>
-<div class="container mx-auto px-4 py-12">
-<h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">Catalogo de Miniaturas</h1>
-<p class="text-slate-300 mb-8">Pre vendas</p>
-<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-''' + html + '''
-</div>
-</div>
-<div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
-<div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8">
-<h2 class="text-2xl font-black text-blue-400 mb-4">Confirmar Reserva</h2>
-<div id="confirmContent" class="text-slate-300 mb-6 space-y-3"></div>
-<div class="mb-4">
-<label class="block text-slate-300 font-bold mb-2">Quantidade:</label>
-<div class="flex gap-2">
-<button type="button" onclick="decrementarQtd()" class="bg-red-600 hover:bg-red-700 text-white font-bold w-12 h-12 rounded-lg">-</button>
-<input type="number" id="quantidadeInput" value="1" min="1" class="flex-1 bg-slate-700 text-white font-bold text-center rounded-lg border-2 border-blue-600" onchange="validarQuantidade()">
-<button type="button" onclick="incrementarQtd()" class="bg-green-600 hover:bg-green-700 text-white font-bold w-12 h-12 rounded-lg">+</button>
-</div>
-<p id="erroQtd" class="text-red-400 text-sm mt-2 hidden"></p>
-</div>
-<div class="flex gap-4">
-<button onclick="fecharModal()" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-2 rounded-lg">Cancelar</button>
-<button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700 text-white font-bold py-2 rounded-lg">Confirmar</button>
-</div>
-</div>
-</div>
-<script>
+    admin_link = '<a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a>' if request.user.get('is_admin') else ''
+    
+    page = f'''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Minhas Reservas</a>{admin_link}<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">Catalogo de Miniaturas</h1><p class="text-slate-300 mb-8">Pre vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">{html}</div></div><div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8"><h2 class="text-2xl font-black text-blue-400 mb-4">Confirmar Reserva</h2><div id="confirmContent" class="text-slate-300 mb-6 space-y-3"></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Quantidade:</label><div class="flex gap-2"><button type="button" onclick="decrementarQtd()" class="bg-red-600 text-white font-bold w-12 h-12 rounded-lg">-</button><input type="number" id="quantidadeInput" value="1" min="1" class="flex-1 bg-slate-700 text-white font-bold text-center rounded-lg border-2 border-blue-600"><button type="button" onclick="incrementarQtd()" class="bg-green-600 text-white font-bold w-12 h-12 rounded-lg">+</button></div></div><div class="flex gap-4"><button onclick="fecharModal()" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg">Cancelar</button><button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Confirmar</button></div></div></div><script>
 let reservaAtual = null;
 let maxQtd = 1;
-
-function abrirConfirmacao(id, nome, preco, stock, max) {
+function abrirConfirmacao(id, nome, preco, stock, max) {{
   reservaAtual = id;
   maxQtd = Math.min(stock, max);
   document.getElementById("quantidadeInput").max = maxQtd;
   document.getElementById("quantidadeInput").value = 1;
-  document.getElementById("confirmContent").innerHTML = "<p><strong>Produto:</strong> " + nome + "</p><p><strong>Valor Unitario:</strong> R$ " + parseFloat(preco).toFixed(2) + "</p><p><strong>Disponivel:</strong> " + stock + " unidades</p><p><strong>Maximo por Cliente:</strong> " + max + "</p><p class=\"text-yellow-300 text-sm mt-2\">Confirmar esta reserva?</p>";
+  document.getElementById("confirmContent").innerHTML = "<p><strong>Produto:</strong> " + nome + "</p><p><strong>Valor:</strong> R$ " + parseFloat(preco).toFixed(2) + "</p><p><strong>Disponivel:</strong> " + stock + "</p>";
   document.getElementById("confirmModal").classList.remove("hidden");
-}
-
-function fecharModal() {
+}}
+function fecharModal() {{
   document.getElementById("confirmModal").classList.add("hidden");
   reservaAtual = null;
-  document.getElementById("erroQtd").classList.add("hidden");
-}
-
-function decrementarQtd() {
+}}
+function decrementarQtd() {{
   let input = document.getElementById("quantidadeInput");
   if (input.value > 1) input.value = parseInt(input.value) - 1;
-}
-
-function incrementarQtd() {
+}}
+function incrementarQtd() {{
   let input = document.getElementById("quantidadeInput");
   if (parseInt(input.value) < maxQtd) input.value = parseInt(input.value) + 1;
-}
-
-function validarQuantidade() {
-  let input = document.getElementById("quantidadeInput");
-  let erro = document.getElementById("erroQtd");
-  if (parseInt(input.value) > maxQtd) {
-    input.value = maxQtd;
-    erro.textContent = "Limite maximo atingido!";
-    erro.classList.remove("hidden");
-  } else {
-    erro.classList.add("hidden");
-  }
-}
-
-function confirmarReserva() {
+}}
+function confirmarReserva() {{
   if (!reservaAtual) return;
   let qtd = parseInt(document.getElementById("quantidadeInput").value);
-  fetch("/reservar", {
+  fetch("/reservar", {{
     method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({miniatura_id: reservaAtual, quantidade: qtd})
-  }).then(r => r.json()).then(data => {
-    if (data.success) {
-      alert("OK Reserva realizada com sucesso!");
+    headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{miniatura_id: reservaAtual, quantidade: qtd}})
+  }}).then(r => r.json()).then(data => {{
+    if (data.success) {{
+      alert("OK Reserva realizada!");
       location.reload();
-    } else {
+    }} else {{
       alert("ERRO: " + data.error);
-    }
-  }).catch(e => {
+    }}
+  }}).catch(e => {{
     alert("ERRO na requisicao");
-  });
+  }});
   fecharModal();
-}
-</script>
-</body>
-</html>'''
+}}
+</script></body></html>'''
     
-    return home_html
+    return page
 
 @app.route('/minhas-reservas')
 @login_required
@@ -512,112 +339,57 @@ def minhas_reservas():
     conn.close()
     
     if not reservas:
-        html = '<p class="text-slate-400 text-center py-8">Nenhuma reserva ainda</p>'
+        html = '<p class="text-slate-400 text-center py-8">Nenhuma reserva</p>'
     else:
-        html = '<table class="w-full text-slate-200"><thead class="bg-blue-700"><tr><th class="p-3 text-left">Data</th><th class="p-3 text-left">Produto</th><th class="p-3 text-center">Quantidade</th><th class="p-3 text-right">Valor Unit</th><th class="p-3 text-right">Total</th></tr></thead><tbody>'
+        html = '<table class="w-full text-slate-200"><thead class="bg-blue-700"><tr><th class="p-3 text-left">Data</th><th class="p-3 text-left">Produto</th><th class="p-3 text-center">Qtd</th><th class="p-3 text-right">Valor</th><th class="p-3 text-right">Total</th></tr></thead><tbody>'
         total = 0
         for idx, r in enumerate(reservas):
             subtotal = r[2] * r[3]
             total += subtotal
             bg = 'bg-slate-700' if idx % 2 == 0 else 'bg-slate-800'
-            html += f'<tr class="{bg} border-b border-slate-600"><td class="p-3">{r[0][:10]}</td><td class="p-3 font-semibold text-blue-300">{r[1]}</td><td class="p-3 text-center font-bold text-red-400">{r[3]}</td><td class="p-3 text-right">R$ {r[2]:.2f}</td><td class="p-3 text-right font-bold text-red-400">R$ {subtotal:.2f}</td></tr>'
-        html += f'<tr class="bg-gradient-to-r from-blue-700 to-red-700 font-black text-white"><td colspan="4" class="p-3 text-right">TOTAL:</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table>'
+            html += f'<tr class="{bg}"><td class="p-3">{r[0][:10]}</td><td class="p-3">{r[1]}</td><td class="p-3 text-center">{r[3]}</td><td class="p-3 text-right">R$ {r[2]:.2f}</td><td class="p-3 text-right">R$ {subtotal:.2f}</td></tr>'
+        html += f'<tr class="bg-red-700 font-black text-white"><td colspan="4" class="p-3 text-right">TOTAL:</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table>'
     
     return f'''<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Minhas Reservas</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-</head>
-<body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen">
-<nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600">
-<div class="container mx-auto px-4 py-4 flex justify-between items-center">
-<span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span>
-<div class="flex gap-4">
-<a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg">Catalogo</a>
-<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg">Sair</a>
-</div>
-</div>
-</nav>
-<div class="container mx-auto px-4 py-12">
-<h1 class="text-4xl font-black text-blue-400 mb-8">Minhas Reservas</h1>
-<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl p-8 border-2 border-blue-600">
-{html}
-</div>
-</div>
-</body>
-</html>'''
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Minhas Reservas</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 min-h-screen"><nav class="bg-blue-900 border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between"><span class="text-3xl font-black text-red-400">JG MINIS</span><div class="flex gap-4"><a href="/" class="bg-blue-600 text-white px-4 py-2 rounded">Catalogo</a><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded">Sair</a></div></div></nav><div class="container mx-auto px-4 py-8"><h1 class="text-4xl font-black text-blue-400 mb-8">Minhas Reservas</h1><div class="bg-slate-800 rounded-xl p-8 border-2 border-blue-600">{html}</div></div></body></html>'''
 
 @app.route('/admin')
 @admin_required
 def admin():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
     c.execute('SELECT COUNT(*) FROM reservations')
     total_reservas = c.fetchone()[0]
     c.execute('SELECT SUM(r.quantity * m.price) FROM reservations r JOIN miniaturas m ON r.miniatura_id = m.id')
     total_valor = c.fetchone()[0] or 0
-    
     c.execute('SELECT r.created_at, u.name, u.email, u.phone, m.name, r.quantity, m.price FROM reservations r JOIN users u ON r.user_id = u.id JOIN miniaturas m ON r.miniatura_id = m.id ORDER BY r.created_at DESC')
     reservas = c.fetchall()
     conn.close()
     
-    html = f'<h2 class="text-3xl font-black text-blue-400 mb-6">Total Reservas: {total_reservas} | Total: R$ {total_valor:.2f}</h2>'
-    html += '<div class="overflow-x-auto"><table class="w-full text-slate-200 text-sm"><thead class="bg-gradient-to-r from-blue-700 to-blue-900"><tr><th class="p-3 text-left">Data</th><th class="p-3 text-left">Cliente</th><th class="p-3 text-left">Email</th><th class="p-3 text-left">Telefone</th><th class="p-3 text-left">Produto</th><th class="p-3 text-center">Qtd</th><th class="p-3 text-right">Total</th></tr></thead><tbody>'
+    html = f'<h2 class="text-3xl font-black text-blue-400 mb-6">Total: {total_reservas} reservas | R$ {total_valor:.2f}</h2>'
+    html += '<table class="w-full text-slate-200 text-sm"><thead class="bg-blue-700"><tr><th class="p-3 text-left">Data</th><th class="p-3 text-left">Cliente</th><th class="p-3 text-left">Email</th><th class="p-3 text-left">Tel</th><th class="p-3 text-left">Produto</th><th class="p-3 text-center">Qtd</th><th class="p-3 text-right">Total</th></tr></thead><tbody>'
     
     total = 0
     for idx, r in enumerate(reservas):
         subtotal = r[5] * r[6]
         total += subtotal
         bg = 'bg-slate-700' if idx % 2 == 0 else 'bg-slate-800'
-        html += f'<tr class="{bg} border-b border-slate-600"><td class="p-3">{r[0][:10]}</td><td class="p-3 font-semibold text-blue-300">{r[1]}</td><td class="p-3 text-slate-400">{r[2]}</td><td class="p-3 text-slate-400">{r[3]}</td><td class="p-3">{r[4]}</td><td class="p-3 text-center font-bold text-red-400">{r[5]}</td><td class="p-3 text-right font-bold text-red-400">R$ {subtotal:.2f}</td></tr>'
+        html += f'<tr class="{bg}"><td class="p-3">{r[0][:10]}</td><td class="p-3">{r[1]}</td><td class="p-3">{r[2]}</td><td class="p-3">{r[3]}</td><td class="p-3">{r[4]}</td><td class="p-3 text-center">{r[5]}</td><td class="p-3 text-right">R$ {subtotal:.2f}</td></tr>'
     
-    html += f'<tr class="bg-gradient-to-r from-blue-700 to-red-700 font-black text-white"><td colspan="6" class="p-3 text-right">TOTAL GERAL</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table></div>'
-    html += '<button onclick="sincronizarAgora()" class="mt-4 bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white px-6 py-2 rounded-lg font-bold transition">Sincronizar Agora</button>'
+    html += f'<tr class="bg-red-700 font-black text-white"><td colspan="6" class="p-3 text-right">TOTAL</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table>'
+    html += '<button onclick="sincronizar()" class="mt-4 bg-purple-600 text-white px-6 py-2 rounded font-bold">Sincronizar Agora</button>'
     
     return f'''<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Admin</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-</head>
-<body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen">
-<nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600">
-<div class="container mx-auto px-4 py-4 flex justify-between items-center">
-<span class="text-3xl font-black text-blue-400">Admin</span>
-<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg">Sair</a>
-</div>
-</nav>
-<div class="container mx-auto px-4 py-8">
-<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-2xl p-8 border-2 border-blue-600">
-{html}
-</div>
-</div>
-<script>
-function sincronizarAgora() {
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 min-h-screen"><nav class="bg-blue-900 border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between"><span class="text-3xl font-black text-red-400">Admin</span><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded">Sair</a></div></nav><div class="container mx-auto px-4 py-8"><div class="bg-slate-800 rounded-xl p-8 border-2 border-blue-600">{html}</div></div><script>
+function sincronizar() {{
   fetch("/sincronizar-agora", {{method: "POST", headers: {{"Content-Type": "application/json"}}}})
   .then(r => r.json())
   .then(data => {{
-    if (data.success) {{
-      alert("OK Sincronizacao realizada!");
-      location.reload();
-    }} else {{
-      alert("ERRO: " + data.error);
-    }}
-  }}).catch(e => {{
-    alert("ERRO na sincronizacao");
-  }});
+    alert(data.success ? "OK Sincronizado!" : "ERRO: " + data.error);
+    if (data.success) location.reload();
+  }}).catch(e => alert("ERRO"));
 }}
-</script>
-</body>
-</html>'''
+</script></body></html>'''
 
 @app.route('/reservar', methods=['POST'])
 @login_required
@@ -667,10 +439,7 @@ def reservar():
 def sincronizar_agora():
     try:
         resultado = atualizar_miniaturas()
-        if resultado:
-            return jsonify({'success': True, 'message': 'Sincronizacao realizada!'})
-        else:
-            return jsonify({'success': False, 'error': 'Erro ao sincronizar'}), 500
+        return jsonify({'success': resultado})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
