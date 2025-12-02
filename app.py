@@ -22,10 +22,13 @@ def convert_drive_url(drive_url):
     """Converte links do Google Drive para acesso direto"""
     if not drive_url or 'drive.google.com' not in drive_url:
         return drive_url
+    
     match = re.search(r'/d/([a-zA-Z0-9-_]+)', drive_url)
     if match:
         file_id = match.group(1)
-        return f'https://drive.google.com/uc?id={file_id}&export=download'
+        converted_url = f'https://drive.google.com/uc?id={file_id}&export=download'
+        print(f"🔄 Convertendo URL: {drive_url[:50]}... → {converted_url}")
+        return converted_url
     return drive_url
 
 def load_from_google_sheets():
@@ -43,6 +46,7 @@ def load_from_google_sheets():
             return None
         
         headers = [h.strip().upper() for h in rows[0]]
+        print(f"📋 Colunas encontradas: {headers}")
         
         try:
             idx_imagem = headers.index('IMAGEM')
@@ -73,8 +77,10 @@ def load_from_google_sheets():
                 valor = float(row[idx_valor].strip().replace(',', '.') or 0.0)
                 max_res = int(row[idx_max].strip() or 3)
                 
+                url_convertida = convert_drive_url(imagem)
+                
                 miniaturas.append((
-                    convert_drive_url(imagem),
+                    url_convertida,
                     nome,
                     row[idx_chegada].strip(),
                     qtd,
@@ -83,6 +89,7 @@ def load_from_google_sheets():
                     max_res
                 ))
                 print(f"  ✅ Linha {i}: {nome} - R$ {valor:.2f} ({qtd} em estoque)")
+                print(f"     URL: {url_convertida}")
             except Exception as e:
                 print(f"  ⚠️ Linha {i}: Erro ao processar - {e}")
                 continue
@@ -304,7 +311,7 @@ HOME_HTML = '''<!DOCTYPE html>
     <div class="container mx-auto px-4 py-12">
         <div class="mb-12 text-center">
             <h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2"><i class="fas fa-cube text-red-500 mr-3"></i>Catálogo de Miniaturas</h1>
-            <p class="text-slate-300 text-lg">Explore nossa coleção exclusiva e premium</p>
+            <p class="text-slate-300 text-lg">Pré vendas</p>
             <div class="w-24 h-1 bg-gradient-to-r from-blue-500 to-red-500 mx-auto mt-4 rounded"></div>
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
@@ -412,8 +419,11 @@ def index():
         
         html += f'''
         <div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg hover:shadow-2xl transition-all duration-300 overflow-hidden group border-2 border-blue-600 hover:border-red-500">
-            <div class="relative overflow-hidden bg-black h-64">
-                <img src="{m[1]}" class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" alt="{m[2]}" onerror="this.src='https://via.placeholder.com/300'">
+            <div class="relative overflow-hidden bg-black h-64 flex items-center justify-center">
+                <img src="{m[1]}" 
+                     class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" 
+                     alt="{m[2]}"
+                     onerror="this.src='https://via.placeholder.com/300x300?text=Imagem+Indisponível'; this.style.objectFit='contain';">
                 <div class="absolute top-3 right-3 {status_class} text-white px-3 py-1 rounded-full text-sm font-bold shadow-lg">
                     {status_text}
                 </div>
