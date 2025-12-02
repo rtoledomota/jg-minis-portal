@@ -29,10 +29,12 @@ atexit.register(lambda: scheduler.shutdown())
 def convert_drive_url(drive_url):
     if not drive_url or 'drive.google.com' not in drive_url:
         return drive_url
+    
     match = re.search(r'/d/([a-zA-Z0-9-_]+)', drive_url)
     if match:
         file_id = match.group(1)
-        return f'https://drive.google.com/uc?export=view&id={file_id}'
+        return f'https://drive-thru.chatpic.run/download/{file_id}/0' # MODIFIED LINE
+    
     return drive_url
 
 def load_from_google_sheets():
