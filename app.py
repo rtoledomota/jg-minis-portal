@@ -26,16 +26,23 @@ scheduler = BackgroundScheduler()
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
-def convert_drive_url(drive_url):
-    if not drive_url or 'drive.google.com' not in drive_url:
-        return drive_url
+def validate_image_url(image_url):
+    """Valida se a URL da imagem é do Imgur ou URL direta válida"""
+    if not image_url or not image_url.strip():
+        return None
     
-    match = re.search(r'/d/([a-zA-Z0-9-_]+)', drive_url)
-    if match:
-        file_id = match.group(1)
-        return f'https://drive-thru.chatpic.run/download/{file_id}/0' # MODIFIED LINE
+    image_url = image_url.strip()
     
-    return drive_url
+    # Aceita URLs do Imgur
+    if 'imgur.com' in image_url:
+        return image_url
+    
+    # Aceita outras URLs diretas de imagem (jpg, png, gif, webp)
+    if any(image_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']):
+        return image_url
+    
+    # Se não for válida, retorna None
+    return None
 
 def load_from_google_sheets():
     try:
@@ -76,12 +83,18 @@ def load_from_google_sheets():
             if not imagem or not nome:
                 continue
             
+            # Valida a URL da imagem
+            imagem_valida = validate_image_url(imagem)
+            if not imagem_valida:
+                print(f"  AVISO Linha {i}: URL de imagem inválida: {imagem}")
+                continue
+            
             try:
                 qtd = int(row[idx_qtd].strip() or 0)
                 valor = float(row[idx_valor].strip().replace(',', '.') or 0.0)
                 max_res = int(row[idx_max].strip() or 3)
-                url_convertida = convert_drive_url(imagem)
-                miniaturas.append((url_convertida, nome, row[idx_chegada].strip(), qtd, valor, row[idx_obs].strip(), max_res))
+                
+                miniaturas.append((imagem_valida, nome, row[idx_chegada].strip(), qtd, valor, row[idx_obs].strip(), max_res))
                 print(f"  OK {nome} - R$ {valor:.2f} ({qtd} em estoque)")
             except Exception as e:
                 print(f"  ERRO Linha {i}: {e}")
