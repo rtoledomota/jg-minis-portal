@@ -125,9 +125,9 @@ def init_db():
     )''')
     
     c.execute('INSERT INTO users (name, email, password, phone, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-              ('Admin', 'admin@example.com', generate_password_hash('SenhaForte123!'), '(11) 99999-9999', True, datetime.now().isoformat()))
+              ('Admin', 'admin@example.com', generate_password_hash('admin123'), '(11) 99999-9999', True, datetime.now().isoformat()))
     c.execute('INSERT INTO users (name, email, password, phone, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-              ('Usuário Teste', 'usuario@example.com', generate_password_hash('Usuario123!'), '(11) 98888-8888', False, datetime.now().isoformat()))
+              ('Usuário Teste', 'usuario@example.com', generate_password_hash('usuario123'), '(11) 98888-8888', False, datetime.now().isoformat()))
     
     miniaturas = load_from_google_sheets()
     if miniaturas:
@@ -170,16 +170,16 @@ def admin_required(f):
     return decorated
 
 LOGIN_HTML = '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-br from-slate-900 via-blue-900 to-black min-h-screen flex items-center justify-center"><div class="w-full max-w-md"><div class="bg-gradient-to-b from-slate-800 to-black rounded-2xl shadow-2xl overflow-hidden border-2 border-red-600"><div class="bg-gradient-to-r from-blue-700 via-blue-900 to-black p-8 text-center border-b-2 border-red-600"><div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600 overflow-hidden"><img src="{{ logo_url }}" alt="Logo" class="w-full h-full object-contain p-2"></div><h2 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">JG MINIS</h2><p class="text-blue-300 font-semibold">Portal de Miniaturas Premium</p></div><div class="p-8"><div class="flex gap-4 mb-6 border-b border-slate-600"><button class="nav-tab active pb-4 px-4 font-bold text-red-500 border-b-2 border-red-500 cursor-pointer" onclick="switchTab('login')">Login</button><button class="nav-tab pb-4 px-4 font-bold text-slate-400 cursor-pointer hover:text-blue-400" onclick="switchTab('register')">Cadastro</button></div><div id="login" class="tab-content">{% if error %}<div class="bg-red-900 border border-red-600 text-red-200 px-4 py-3 rounded-lg mb-4"><i class="fas fa-exclamation-circle"></i> {{ error }}</div>{% endif %}<form method="POST" action="/login"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">📧 Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">🔐 Senha</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg hover:shadow-2xl">Entrar</button></form></div><div id="register" class="tab-content hidden">{% if register_error %}<div class="bg-red-900 border border-red-600 text-red-200 px-4 py-3 rounded-lg mb-4">{{ register_error }}</div>{% endif %}<form method="POST" action="/register"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">👤 Nome</label><input type="text" name="name" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">📧 Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">📱 Tel (11) xxxxx-xxxx</label><input type="tel" name="phone" placeholder="(11) 99999-9999" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">🔐 Senha (min 8)</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">🔐 Confirme</label><input type="password" name="confirm_password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Cadastrar</button></form></div></div></div></div><script>function switchTab(t){document.querySelectorAll('.tab-content').forEach(e=>e.classList.add('hidden'));document.getElementById(t).classList.remove('hidden');}</script></body></html>'''
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-br from-slate-900 via-blue-900 to-black min-h-screen flex items-center justify-center"><div class="w-full max-w-md"><div class="bg-gradient-to-b from-slate-800 to-black rounded-2xl shadow-2xl overflow-hidden border-2 border-red-600"><div class="bg-gradient-to-r from-blue-700 via-blue-900 to-black p-8 text-center border-b-2 border-red-600"><div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600 overflow-hidden"><img src="{{ logo_url }}" alt="Logo" class="w-full h-full object-contain p-2"></div><h2 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">JG MINIS</h2><p class="text-blue-300 font-semibold">Portal de Miniaturas Premium</p></div><div class="p-8"><div class="flex gap-4 mb-6 border-b border-slate-600"><button class="nav-tab active pb-4 px-4 font-bold text-red-500 border-b-2 border-red-500 cursor-pointer" onclick="switchTab('login')">Login</button><button class="nav-tab pb-4 px-4 font-bold text-slate-400 cursor-pointer hover:text-blue-400" onclick="switchTab('register')">Cadastro</button></div><div id="login" class="tab-content">{% if error %}<div class="bg-red-900 border border-red-600 text-red-200 px-4 py-3 rounded-lg mb-4"><i class="fas fa-exclamation-circle"></i> {{ error }}</div>{% endif %}<form method="POST" action="/login"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">📧 Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">🔐 Senha</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg hover:shadow-2xl">Entrar</button></form><hr class="my-4 border-slate-600"><div class="text-xs text-slate-400"><p><strong>Admin:</strong> admin@example.com / admin123</p></div></div><div id="register" class="tab-content hidden">{% if register_error %}<div class="bg-red-900 border border-red-600 text-red-200 px-4 py-3 rounded-lg mb-4">{{ register_error }}</div>{% endif %}<form method="POST" action="/register"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">👤 Nome</label><input type="text" name="name" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">📧 Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">📱 Tel (11) xxxxx-xxxx</label><input type="tel" name="phone" placeholder="(11) 99999-9999" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">🔐 Senha (min 8)</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">🔐 Confirme</label><input type="password" name="confirm_password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Cadastrar</button></form></div></div></div></div><script>function switchTab(t){document.querySelectorAll('.tab-content').forEach(e=>e.classList.add('hidden'));document.getElementById(t).classList.remove('hidden');}</script></body></html>'''
 
 HOME_HTML = '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/minhas-reservas" class="bg-blue-600 text-white px-4 py-2 rounded-lg">Minhas Reservas</a>{% if is_admin %}<a href="/admin" class="bg-red-600 text-white px-4 py-2 rounded-lg">Admin</a>{% endif %}<a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded-lg">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-4xl font-black text-blue-400 mb-2">Catálogo</h1><p class="text-slate-300 mb-8">Pré vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">{{ miniaturas|safe }}</div></div></body></html>'''
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold"><i class="fas fa-list mr-2"></i>Minhas Reservas</a>{% if is_admin %}<a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold"><i class="fas fa-chart-bar mr-2"></i>Admin</a>{% endif %}<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2"><i class="fas fa-cube mr-2"></i>Catálogo de Miniaturas</h1><p class="text-slate-300 mb-8">Pré vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">{{ miniaturas|safe }}</div></div><div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8"><h2 class="text-2xl font-black text-blue-400 mb-4"><i class="fas fa-shopping-cart mr-2"></i>Confirmar Reserva</h2><div id="confirmContent" class="text-slate-300 mb-6 space-y-2"></div><div class="flex gap-4"><button onclick="fecharModal()" class="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-2 rounded-lg">Cancelar</button><button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700 text-white font-bold py-2 rounded-lg">Confirmar</button></div></div></div><script>let reservaAtual=null;function abrirConfirmacao(id,nome,preco){reservaAtual=id;document.getElementById('confirmContent').innerHTML=`<p><strong>Produto:</strong> ${nome}</p><p><strong>Valor:</strong> R$ ${parseFloat(preco).toFixed(2)}</p><p class="text-yellow-300 text-sm mt-4"><i class="fas fa-info-circle"></i> Confirmar esta reserva?</p>`;document.getElementById('confirmModal').classList.remove('hidden');}function fecharModal(){document.getElementById('confirmModal').classList.add('hidden');reservaAtual=null;}function confirmarReserva(){if(!reservaAtual)return;fetch('/reservar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({miniatura_id:reservaAtual})}).then(r=>r.json()).then(data=>{if(data.success){alert('✅ Reserva realizada!');location.reload();}else{alert('❌ Erro: '+data.error);}}).catch(e=>{alert('❌ Erro na requisição');});fecharModal();}</script></body></html>'''
 
 MINHAS_RESERVAS_HTML = '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Minhas Reservas</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-blue-400">JG MINIS</span><div class="flex gap-4"><a href="/" class="bg-blue-600 text-white px-4 py-2 rounded-lg">Catálogo</a><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded-lg">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-4xl font-black text-blue-400 mb-8">Minhas Reservas</h1><div class="bg-slate-800 rounded-xl p-8 border-2 border-blue-600">{{ content|safe }}</div></div></body></html>'''
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Minhas Reservas</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg"><i class="fas fa-home mr-2"></i>Catálogo</a><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-4xl font-black text-blue-400 mb-8"><i class="fas fa-list mr-2"></i>Minhas Reservas</h1><div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl p-8 border-2 border-blue-600">{{ content|safe }}</div></div></body></html>'''
 
 ADMIN_HTML = '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between"><span class="text-3xl font-black text-blue-400">Admin</span><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded-lg">Sair</a></div></nav><div class="container mx-auto px-4 py-8">{{ content|safe }}</div></body></html>'''
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-blue-400"><i class="fas fa-shield mr-2"></i>Admin</span><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg">Sair</a></div></nav><div class="container mx-auto px-4 py-8"><div class="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">{{ stats|safe }}</div><div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-2xl p-8 border-2 border-blue-600">{{ content|safe }}</div></div></body></html>'''
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -242,7 +242,8 @@ def index():
     
     html = ''
     for m in miniaturas:
-        html += f'''<div class="bg-slate-800 rounded-xl border-2 border-blue-600 overflow-hidden"><div class="bg-black h-48 flex items-center justify-center"><img src="{m[1]}" class="w-full h-full object-cover" alt="{m[2]}" onerror="this.innerHTML='🎲'"></div><div class="p-4"><h3 class="font-bold text-blue-300">{m[2]}</h3><p class="text-sm text-slate-400 mb-2">Chegada: {m[3]}</p><p class="text-lg font-bold text-red-400">R$ {m[5]:.2f}</p><button onclick="reservar({m[0]})" class="w-full mt-2 bg-blue-600 text-white px-4 py-2 rounded-lg" {'disabled' if m[4] == 0 else ''}>Reservar ({m[4]})</button></div></div>'''
+        disabled = 'disabled opacity-50 cursor-not-allowed' if m[4] == 0 else ''
+        html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 hover:border-red-500 overflow-hidden"><div class="bg-black h-48 flex items-center justify-center relative"><img src="{m[1]}" class="w-full h-full object-cover" alt="{m[2]}" onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'; this.innerHTML='<span style=\'color:white; font-size:48px;\'><i class=\'fas fa-dice-d6\'></i></span>'"><div class="absolute top-3 right-3 {'bg-green-600' if m[4] > 0 else 'bg-red-600'} text-white px-3 py-1 rounded-full text-sm font-bold">{m[4]} em estoque</div></div><div class="p-4"><h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3><p class="text-sm text-slate-400 mb-2"><i class="fas fa-calendar mr-1"></i>Chegada: {m[3]}</p><p class="text-sm text-slate-400 mb-3"><i class="fas fa-sticky-note mr-1"></i>{m[6]}</p><div class="flex justify-between items-center"><span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span><button onclick="abrirConfirmacao({m[0]}, '{m[2]}', {m[5]})" class="bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700 text-white font-bold px-4 py-2 rounded-lg {disabled}" {'' if m[4] > 0 else 'disabled'}><i class="fas fa-shopping-cart mr-1"></i>Reservar</button></div></div></div>'''
     
     return render_template_string(HOME_HTML, miniaturas=html, is_admin=request.user.get('is_admin', False), logo_url=LOGO_URL)
 
@@ -257,15 +258,16 @@ def minhas_reservas():
     conn.close()
     
     if not reservas:
-        html = '<p class="text-slate-400">Nenhuma reserva ainda</p>'
+        html = '<p class="text-slate-400 text-center py-8"><i class="fas fa-inbox text-4xl mb-4 block"></i>Nenhuma reserva ainda</p>'
     else:
-        html = '<table class="w-full text-slate-200"><tr class="border-b border-slate-600"><th class="p-2 text-left">Data</th><th class="p-2 text-left">Produto</th><th class="p-2 text-center">Qtd</th><th class="p-2 text-right">Total</th></tr>'
+        html = '<table class="w-full text-slate-200"><thead class="bg-blue-700"><tr><th class="p-3 text-left">Data</th><th class="p-3 text-left">Produto</th><th class="p-3 text-center">Qtd</th><th class="p-3 text-right">Valor Unitário</th><th class="p-3 text-right">Total</th></tr></thead><tbody>'
         total = 0
-        for r in reservas:
+        for idx, r in enumerate(reservas):
             subtotal = r[2] * r[3]
             total += subtotal
-            html += f'<tr class="border-b border-slate-600"><td class="p-2">{r[0][:10]}</td><td class="p-2">{r[1]}</td><td class="p-2 text-center">{r[3]}</td><td class="p-2 text-right">R$ {subtotal:.2f}</td></tr>'
-        html += f'<tr class="font-bold"><td colspan="3" class="p-2">TOTAL</td><td class="p-2 text-right">R$ {total:.2f}</td></tr></table>'
+            bg = 'bg-slate-700' if idx % 2 == 0 else 'bg-slate-800'
+            html += f'<tr class="{bg} border-b border-slate-600"><td class="p-3">{r[0][:10]}</td><td class="p-3 font-semibold text-blue-300">{r[1]}</td><td class="p-3 text-center">{r[3]}</td><td class="p-3 text-right">R$ {r[2]:.2f}</td><td class="p-3 text-right font-bold text-red-400">R$ {subtotal:.2f}</td></tr>'
+        html += f'<tr class="bg-gradient-to-r from-blue-700 to-red-700 font-black text-white"><td colspan="4" class="p-3 text-right">TOTAL:</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table>'
     
     return render_template_string(MINHAS_RESERVAS_HTML, content=html)
 
@@ -278,7 +280,22 @@ def admin():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    query = 'SELECT r.created_at, u.name, m.name, r.quantity, m.price FROM reservations r JOIN users u ON r.user_id = u.id JOIN miniaturas m ON r.miniatura_id = m.id WHERE 1=1'
+    c.execute('SELECT COUNT(*) FROM reservations')
+    total_reservas = c.fetchone()[0]
+    c.execute('SELECT SUM(r.quantity * m.price) FROM reservations r JOIN miniaturas m ON r.miniatura_id = m.id')
+    total_valor = c.fetchone()[0] or 0
+    c.execute('SELECT COUNT(DISTINCT user_id) FROM reservations')
+    total_clientes = c.fetchone()[0]
+    
+    stats = f'''<div class="bg-gradient-to-br from-blue-600 to-blue-800 text-white p-6 rounded-lg shadow-lg border-2 border-blue-400"><div class="flex justify-between items-center"><div><p class="text-blue-200 text-sm">📦 Total de Reservas</p><p class="text-4xl font-black mt-2">{total_reservas}</p></div></div></div><div class="bg-gradient-to-br from-green-600 to-green-800 text-white p-6 rounded-lg shadow-lg border-2 border-green-400"><div class="flex justify-between"><div><p class="text-green-200 text-sm">💰 Valor Total</p><p class="text-4xl font-black mt-2">R$ {total_valor:.2f}</p></div></div></div><div class="bg-gradient-to-br from-purple-600 to-purple-800 text-white p-6 rounded-lg shadow-lg border-2 border-purple-400"><div><p class="text-purple-200 text-sm">👥 Total de Clientes</p><p class="text-4xl font-black mt-2">{total_clientes}</p></div></div><div class="bg-gradient-to-br from-red-600 to-red-800 text-white p-6 rounded-lg shadow-lg border-2 border-red-400"><div><p class="text-red-200 text-sm">📊 Ticket Médio</p><p class="text-4xl font-black mt-2">R$ {(total_valor/total_reservas if total_reservas > 0 else 0):.2f}</p></div></div>'''
+    
+    c.execute('SELECT DISTINCT u.id, u.name FROM reservations r JOIN users u ON r.user_id = u.id ORDER BY u.name')
+    clientes = c.fetchall()
+    
+    c.execute('SELECT DISTINCT m.id, m.name FROM reservations r JOIN miniaturas m ON r.miniatura_id = m.id ORDER BY m.name')
+    miniaturas_list = c.fetchall()
+    
+    query = 'SELECT r.created_at, u.name, u.email, u.phone, m.name, r.quantity, m.price FROM reservations r JOIN users u ON r.user_id = u.id JOIN miniaturas m ON r.miniatura_id = m.id WHERE 1=1'
     params = []
     
     if cliente_filter:
@@ -292,34 +309,32 @@ def admin():
     
     c.execute(query, params)
     reservas = c.fetchall()
-    
-    c.execute('SELECT DISTINCT u.id, u.name FROM reservations r JOIN users u ON r.user_id = u.id ORDER BY u.name')
-    clientes = c.fetchall()
-    
-    c.execute('SELECT DISTINCT m.id, m.name FROM reservations r JOIN miniaturas m ON r.miniatura_id = m.id ORDER BY m.name')
-    miniaturas_list = c.fetchall()
-    
     conn.close()
     
-    filtros = '<div class="mb-6 flex gap-4 flex-wrap"><form method="GET" class="flex gap-4"><select name="cliente" class="bg-slate-700 text-white px-4 py-2 rounded-lg"><option>Todos</option>'
+    filtros = '<div class="mb-6 p-4 bg-slate-700 rounded-lg"><form method="GET" class="flex gap-4 flex-wrap"><select name="cliente" class="bg-slate-600 text-white px-4 py-2 rounded-lg border border-blue-500"><option value="">👥 Todos os Clientes</option>'
     for cli in clientes:
         selected = 'selected' if str(cli[0]) == cliente_filter else ''
         filtros += f'<option value="{cli[0]}" {selected}>{cli[1]}</option>'
-    filtros += '</select><select name="miniatura" class="bg-slate-700 text-white px-4 py-2 rounded-lg"><option>Todas</option>'
+    filtros += '</select><select name="miniatura" class="bg-slate-600 text-white px-4 py-2 rounded-lg border border-blue-500"><option value="">🎲 Todas as Miniaturas</option>'
     for mini in miniaturas_list:
         selected = 'selected' if str(mini[0]) == miniatura_filter else ''
         filtros += f'<option value="{mini[0]}" {selected}>{mini[1]}</option>'
-    filtros += '</select><button class="bg-blue-600 text-white px-4 py-2 rounded-lg">Filtrar</button></form></div>'
+    filtros += '</select><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-bold"><i class="fas fa-filter mr-2"></i>Filtrar</button><a href="/admin" class="bg-slate-600 hover:bg-slate-500 text-white px-4 py-2 rounded-lg font-bold">Limpar</a></form></div>'
     
-    html = filtros + '<table class="w-full text-slate-200 text-sm"><tr class="border-b"><th class="p-2 text-left">Data</th><th class="p-2 text-left">Cliente</th><th class="p-2 text-left">Produto</th><th class="p-2 text-center">Qtd</th><th class="p-2 text-right">Total</th></tr>'
+    html = filtros
+    html += '<h2 class="text-3xl font-black text-blue-400 mb-6"><i class="fas fa-list mr-2"></i>Reservas</h2>'
+    html += '<div class="overflow-x-auto"><table class="w-full text-slate-200 text-sm"><thead class="bg-gradient-to-r from-blue-700 to-blue-900"><tr><th class="p-3 text-left">Data</th><th class="p-3 text-left">Cliente</th><th class="p-3 text-left">Email</th><th class="p-3 text-left">Telefone</th><th class="p-3 text-left">Produto</th><th class="p-3 text-center">Qtd</th><th class="p-3 text-right">Total</th></tr></thead><tbody>'
+    
     total = 0
-    for r in reservas:
-        subtotal = r[3] * r[4]
+    for idx, r in enumerate(reservas):
+        subtotal = r[5] * r[6]
         total += subtotal
-        html += f'<tr class="border-b border-slate-600"><td class="p-2">{r[0][:10]}</td><td class="p-2">{r[1]}</td><td class="p-2">{r[2]}</td><td class="p-2 text-center">{r[3]}</td><td class="p-2 text-right">R$ {subtotal:.2f}</td></tr>'
-    html += f'<tr class="font-bold"><td colspan="4" class="p-2">TOTAL</td><td class="p-2 text-right">R$ {total:.2f}</td></tr></table>'
+        bg = 'bg-slate-700' if idx % 2 == 0 else 'bg-slate-800'
+        html += f'<tr class="{bg} border-b border-slate-600 hover:bg-blue-600 hover:bg-opacity-20"><td class="p-3">{r[0][:10]}</td><td class="p-3 font-semibold text-blue-300">{r[1]}</td><td class="p-3 text-slate-400">{r[2]}</td><td class="p-3 text-slate-400">{r[3]}</td><td class="p-3">{r[4]}</td><td class="p-3 text-center">{r[5]}</td><td class="p-3 text-right font-bold text-red-400">R$ {subtotal:.2f}</td></tr>'
     
-    return render_template_string(ADMIN_HTML, content=html)
+    html += f'<tr class="bg-gradient-to-r from-blue-700 to-red-700 font-black text-white"><td colspan="6" class="p-3 text-right">TOTAL GERAL</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table></div>'
+    
+    return render_template_string(ADMIN_HTML, content=html, stats=stats)
 
 @app.route('/reservar', methods=['POST'])
 @login_required
@@ -330,12 +345,17 @@ def reservar():
     
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT stock FROM miniaturas WHERE id = ?', (miniatura_id,))
+    c.execute('SELECT stock, max_reservations_per_user FROM miniaturas WHERE id = ?', (miniatura_id,))
     m = c.fetchone()
     
     if not m or m[0] <= 0:
         conn.close()
         return jsonify({'error': 'Sem estoque'}), 400
+    
+    c.execute('SELECT COUNT(*) FROM reservations WHERE user_id = ? AND miniatura_id = ?', (user_id, miniatura_id))
+    if c.fetchone()[0] >= m[1]:
+        conn.close()
+        return jsonify({'error': 'Limite de reservas atingido'}), 400
     
     c.execute('INSERT INTO reservations (user_id, miniatura_id, quantity, created_at) VALUES (?, ?, ?, ?)',
               (user_id, miniatura_id, 1, datetime.now().isoformat()))
