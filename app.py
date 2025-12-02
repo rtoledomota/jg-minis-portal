@@ -16,19 +16,22 @@ app.secret_key = 'jg_minis_secret_key_2024'
 DB_FILE = 'jg_minis.db'
 SHEET_ID = '1sxlvo6j-UTB0xXuyivzWnhRuYvpJFcH2smL4ZzHTUps'
 SHEET_URL = f'https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv'
-LOGO_URL = 'https://i.imgur.com/8FJzK8X.png'
+LOGO_URL = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"%3E%3Crect fill="%231e40af" width="200" height="200"/%3E%3Ctext x="50%" y="50%" font-size="40" font-weight="bold" fill="white" text-anchor="middle" dominant-baseline="middle"%3EJG%3C/text%3E%3Crect x="10" y="120" width="180" height="4" fill="%23dc2626"/%3E%3C/svg%3E'
 
 def convert_drive_url(drive_url):
-    """Converte links do Google Drive para acesso direto"""
+    """Converte links do Google Drive para acesso direto e público"""
     if not drive_url or 'drive.google.com' not in drive_url:
         return drive_url
     
+    # Extrai o ID do arquivo de qualquer formato de URL do Google Drive
     match = re.search(r'/d/([a-zA-Z0-9-_]+)', drive_url)
     if match:
         file_id = match.group(1)
-        converted_url = f'https://drive.google.com/uc?id={file_id}&export=download'
-        print(f"🔄 Convertendo URL: {drive_url[:50]}... → {converted_url}")
+        # URL direta que funciona mesmo sem permissão de acesso
+        converted_url = f'https://lh3.google.com/d/{file_id}=w1000'
+        print(f"✅ URL Convertida: {file_id}")
         return converted_url
+    
     return drive_url
 
 def load_from_google_sheets():
@@ -89,7 +92,6 @@ def load_from_google_sheets():
                     max_res
                 ))
                 print(f"  ✅ Linha {i}: {nome} - R$ {valor:.2f} ({qtd} em estoque)")
-                print(f"     URL: {url_convertida}")
             except Exception as e:
                 print(f"  ⚠️ Linha {i}: Erro ao processar - {e}")
                 continue
@@ -423,7 +425,9 @@ def index():
                 <img src="{m[1]}" 
                      class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" 
                      alt="{m[2]}"
-                     onerror="this.src='https://via.placeholder.com/300x300?text=Imagem+Indisponível'; this.style.objectFit='contain';">
+                     style="background: linear-gradient(135deg, #1e40af 0%, #7c3aed 100%);"
+                     loading="lazy"
+                     onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'; this.style.display='flex'; this.style.alignItems='center'; this.style.justifyContent='center'; this.innerHTML='<span style=\'color:white; font-size:24px;\'>🎲</span>';">
                 <div class="absolute top-3 right-3 {status_class} text-white px-3 py-1 rounded-full text-sm font-bold shadow-lg">
                     {status_text}
                 </div>
