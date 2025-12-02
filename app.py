@@ -11,6 +11,7 @@ import csv
 from io import StringIO
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
+import json
 
 app = Flask(__name__)
 app.secret_key = 'jg_minis_secret_key_2024'
@@ -47,6 +48,7 @@ def load_from_google_sheets():
             return None
         
         headers = [h.strip().upper() for h in rows[0]]
+        print(f"Colunas encontradas: {headers}")
         
         try:
             idx_imagem = headers.index('IMAGEM')
@@ -58,6 +60,7 @@ def load_from_google_sheets():
             idx_max = headers.index('MAX_RESERVAS_POR_USUARIO')
         except ValueError as e:
             print(f"Coluna nao encontrada: {e}")
+            print(f"Colunas disponiveis: {headers}")
             return None
         
         miniaturas = []
@@ -274,7 +277,9 @@ def index():
         is_esgotado = m[4] <= 0
         status = "ESGOTADO" if is_esgotado else f"Em Estoque: {m[4]}"
         status_color = "red" if is_esgotado else "green"
-        button_html = "" if is_esgotado else f'<button onclick="abrirConfirmacao({m[0]}, {json.dumps(m[2])}, {m[5]}, {m[4]}, {m[7]})" class="bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold px-4 py-2 rounded-lg">Reservar</button>'
+        
+        nome_json = json.dumps(m[2])
+        button_html = "" if is_esgotado else f'<button onclick="abrirConfirmacao({m[0]}, {nome_json}, {m[5]}, {m[4]}, {m[7]})" class="bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold px-4 py-2 rounded-lg">Reservar</button>'
         
         items_html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 overflow-hidden">
 <div class="bg-black h-48 flex items-center justify-center relative overflow-hidden">
@@ -407,7 +412,6 @@ function sincronizar() {{
 @app.route('/reservar', methods=['POST'])
 @login_required
 def reservar():
-    import json
     data = request.get_json()
     miniatura_id = data.get('miniatura_id')
     quantidade = data.get('quantidade', 1)
