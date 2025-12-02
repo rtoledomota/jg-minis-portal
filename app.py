@@ -24,7 +24,8 @@ def convert_drive_url(drive_url):
         return drive_url
     match = re.search(r'/d/([a-zA-Z0-9-_]+)', drive_url)
     if match:
-        return f'https://drive.google.com/uc?id={match.group(1)}&export=view'
+        file_id = match.group(1)
+        return f'https://drive.google.com/uc?id={file_id}&export=download'
     return drive_url
 
 def load_from_google_sheets():
