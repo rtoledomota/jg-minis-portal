@@ -21,6 +21,7 @@ DB_FILE = 'jg_minis.db'
 SHEET_ID = '1sxlvo6j-UTB0xXuyivzWnhRuYvpJFcH2smL4ZzHTUps'
 SHEET_URL = f'https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv'
 LOGO_URL = 'https://i.imgur.com/Yp1OiWB.png'
+WHATSAPP_NUMERO = '5511949094290'
 
 # Configurar agendador
 scheduler = BackgroundScheduler()
@@ -167,6 +168,15 @@ def init_db():
         FOREIGN KEY(miniatura_id) REFERENCES miniaturas(id)
     )''')
     
+    c.execute('''CREATE TABLE fila_espera (
+        id INTEGER PRIMARY KEY, 
+        user_id INTEGER, 
+        miniatura_id INTEGER, 
+        created_at TEXT, 
+        FOREIGN KEY(user_id) REFERENCES users(id), 
+        FOREIGN KEY(miniatura_id) REFERENCES miniaturas(id)
+    )''')
+    
     c.execute('INSERT INTO users (name, email, password, phone, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)',
               ('Admin', 'admin@example.com', generate_password_hash('admin123'), '(11) 99999-9999', True, datetime.now().isoformat()))
     c.execute('INSERT INTO users (name, email, password, phone, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -288,25 +298,46 @@ def index():
         is_esgotado = m[4] <= 0
         status_badge = 'bg-red-600 text-white px-3 py-1 rounded-full text-sm font-bold' if is_esgotado else 'bg-green-600 text-white px-3 py-1 rounded-full text-sm font-bold'
         status_text = '❌ ESGOTADO' if is_esgotado else f'✅ {m[4]} em estoque'
-        button_class = 'opacity-50 cursor-not-allowed bg-gray-600' if is_esgotado else 'bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700'
         
-        html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 {'border-red-600' if is_esgotado else 'border-blue-600 hover:border-red-500'} overflow-hidden transition-all">
-            <div class="bg-black h-48 flex items-center justify-center relative overflow-hidden">
-                <img src="{m[1]}" class="w-full h-full object-cover" alt="{m[2]}" onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'; this.innerHTML='<span style=\'color:white; font-size:48px;\'><i class=\'fas fa-dice-d6\'></i></span>'">
-                <div class="absolute top-3 right-3 {status_badge}">
-                    {status_text}
+        if is_esgotado:
+            html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-red-600 overflow-hidden transition-all">
+                <div class="bg-black h-48 flex items-center justify-center relative overflow-hidden">
+                    <img src="{m[1]}" class="w-full h-full object-cover opacity-50" alt="{m[2]}" onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'; this.innerHTML='<span style=\'color:white; font-size:48px;\'><i class=\'fas fa-dice-d6\'></i></span>'">
+                    <div class="absolute top-3 right-3 {status_badge}">
+                        {status_text}
+                    </div>
                 </div>
-            </div>
-            <div class="p-4">
-                <h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3>
-                <p class="text-sm text-slate-400 mb-2"><i class="fas fa-calendar mr-1"></i>Chegada: {m[3]}</p>
-                <p class="text-sm text-slate-400 mb-3"><i class="fas fa-sticky-note mr-1"></i>{m[6]}</p>
-                <div class="flex justify-between items-center gap-2">
-                    <span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
-                    <button onclick="abrirConfirmacao({m[0]}, '{m[2]}', {m[5]}, {m[4]}, {m[7]})" class="text-white font-bold px-4 py-2 rounded-lg {button_class} transition" {'disabled' if is_esgotado else ''}><i class="fas fa-shopping-cart mr-1"></i>{'Esgotado' if is_esgotado else 'Reservar'}</button>
+                <div class="p-4">
+                    <h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3>
+                    <p class="text-sm text-slate-400 mb-2"><i class="fas fa-calendar mr-1"></i>Chegada: {m[3]}</p>
+                    <p class="text-sm text-slate-400 mb-3"><i class="fas fa-sticky-note mr-1"></i>{m[6]}</p>
+                    <div class="flex justify-between items-center gap-2">
+                        <span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
+                    </div>
+                    <div class="flex gap-2 mt-4">
+                        <button onclick="entrarFilaEspera({m[0]}, '{m[2]}')" class="flex-1 bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white font-bold px-3 py-2 rounded-lg transition text-sm"><i class="fas fa-hourglass-end mr-1"></i>Fila de Espera</button>
+                        <a href="https://wa.me/{WHATSAPP_NUMERO}?text=Olá! Tenho interesse no produto: {m[2]}" target="_blank" class="flex-1 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-bold px-3 py-2 rounded-lg transition text-sm text-center"><i class="fas fa-whatsapp mr-1"></i>WhatsApp</a>
+                    </div>
                 </div>
-            </div>
-        </div>'''
+            </div>'''
+        else:
+            html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 hover:border-red-500 overflow-hidden transition-all">
+                <div class="bg-black h-48 flex items-center justify-center relative overflow-hidden">
+                    <img src="{m[1]}" class="w-full h-full object-cover" alt="{m[2]}" onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'; this.innerHTML='<span style=\'color:white; font-size:48px;\'><i class=\'fas fa-dice-d6\'></i></span>'">
+                    <div class="absolute top-3 right-3 {status_badge}">
+                        {status_text}
+                    </div>
+                </div>
+                <div class="p-4">
+                    <h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3>
+                    <p class="text-sm text-slate-400 mb-2"><i class="fas fa-calendar mr-1"></i>Chegada: {m[3]}</p>
+                    <p class="text-sm text-slate-400 mb-3"><i class="fas fa-sticky-note mr-1"></i>{m[6]}</p>
+                    <div class="flex justify-between items-center gap-2">
+                        <span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
+                        <button onclick="abrirConfirmacao({m[0]}, '{m[2]}', {m[5]}, {m[4]}, {m[7]})" class="bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700 text-white font-bold px-4 py-2 rounded-lg transition"><i class="fas fa-shopping-cart mr-1"></i>Reservar</button>
+                    </div>
+                </div>
+            </div>'''
     
     return render_template_string(HOME_HTML, miniaturas=html, is_admin=request.user.get('is_admin', False), logo_url=LOGO_URL)
 
@@ -349,8 +380,10 @@ def admin():
     total_valor = c.fetchone()[0] or 0
     c.execute('SELECT COUNT(DISTINCT user_id) FROM reservations')
     total_clientes = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM fila_espera')
+    total_fila = c.fetchone()[0]
     
-    stats = f'''<div class="bg-gradient-to-br from-blue-600 to-blue-800 text-white p-6 rounded-lg shadow-lg border-2 border-blue-400"><div class="flex justify-between items-center"><div><p class="text-blue-200 text-sm">📦 Total de Reservas</p><p class="text-4xl font-black mt-2">{total_reservas}</p></div></div></div><div class="bg-gradient-to-br from-green-600 to-green-800 text-white p-6 rounded-lg shadow-lg border-2 border-green-400"><div class="flex justify-between"><div><p class="text-green-200 text-sm">💰 Valor Total</p><p class="text-4xl font-black mt-2">R$ {total_valor:.2f}</p></div></div></div><div class="bg-gradient-to-br from-purple-600 to-purple-800 text-white p-6 rounded-lg shadow-lg border-2 border-purple-400"><div><p class="text-purple-200 text-sm">👥 Total de Clientes</p><p class="text-4xl font-black mt-2">{total_clientes}</p></div></div><div class="bg-gradient-to-br from-red-600 to-red-800 text-white p-6 rounded-lg shadow-lg border-2 border-red-400"><div><p class="text-red-200 text-sm">📊 Ticket Médio</p><p class="text-4xl font-black mt-2">R$ {(total_valor/total_reservas if total_reservas > 0 else 0):.2f}</p></div></div>'''
+    stats = f'''<div class="bg-gradient-to-br from-blue-600 to-blue-800 text-white p-6 rounded-lg shadow-lg border-2 border-blue-400"><div class="flex justify-between items-center"><div><p class="text-blue-200 text-sm">📦 Total de Reservas</p><p class="text-4xl font-black mt-2">{total_reservas}</p></div></div></div><div class="bg-gradient-to-br from-green-600 to-green-800 text-white p-6 rounded-lg shadow-lg border-2 border-green-400"><div class="flex justify-between"><div><p class="text-green-200 text-sm">💰 Valor Total</p><p class="text-4xl font-black mt-2">R$ {total_valor:.2f}</p></div></div></div><div class="bg-gradient-to-br from-purple-600 to-purple-800 text-white p-6 rounded-lg shadow-lg border-2 border-purple-400"><div><p class="text-purple-200 text-sm">👥 Total de Clientes</p><p class="text-4xl font-black mt-2">{total_clientes}</p></div></div><div class="bg-gradient-to-br from-yellow-600 to-yellow-800 text-white p-6 rounded-lg shadow-lg border-2 border-yellow-400"><div><p class="text-yellow-200 text-sm">⏳ Fila de Espera</p><p class="text-4xl font-black mt-2">{total_fila}</p></div></div>'''
     
     c.execute('SELECT DISTINCT u.id, u.name FROM reservations r JOIN users u ON r.user_id = u.id ORDER BY u.name')
     clientes = c.fetchall()
@@ -521,6 +554,30 @@ def reservar():
     c.execute('INSERT INTO reservations (user_id, miniatura_id, quantity, created_at) VALUES (?, ?, ?, ?)',
               (user_id, miniatura_id, quantidade, datetime.now().isoformat()))
     c.execute('UPDATE miniaturas SET stock = stock - ? WHERE id = ?', (quantidade, miniatura_id))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True})
+
+@app.route('/fila-espera', methods=['POST'])
+@login_required
+def fila_espera():
+    data = request.get_json()
+    miniatura_id = data.get('miniatura_id')
+    user_id = request.user.get('user_id')
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # Verificar se já está na fila
+    c.execute('SELECT id FROM fila_espera WHERE user_id = ? AND miniatura_id = ?', (user_id, miniatura_id))
+    if c.fetchone():
+        conn.close()
+        return jsonify({'error': 'Você já está na fila de espera!'}), 400
+    
+    # Adicionar à fila
+    c.execute('INSERT INTO fila_espera (user_id, miniatura_id, created_at) VALUES (?, ?, ?)',
+              (user_id, miniatura_id, datetime.now().isoformat()))
     conn.commit()
     conn.close()
     
