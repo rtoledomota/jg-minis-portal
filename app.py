@@ -53,10 +53,10 @@ def load_from_google_sheets():
         try:
             idx_imagem = headers.index('IMAGEM')
             idx_nome = headers.index('NOME DA MINIATURA')
-            idx_chegada = headers.index('PREVISAO DE CHEGADA')
+            idx_chegada = headers.index('PREVISÃO DE CHEGADA')
             idx_qtd = headers.index('QUANTIDADE DISPONIVEL')
             idx_valor = headers.index('VALOR')
-            idx_obs = headers.index('OBSERVACOES')
+            idx_obs = headers.index('OBSERVAÇÕES')
             idx_max = headers.index('MAX_RESERVAS_POR_USUARIO')
         except ValueError as e:
             print(f"Coluna nao encontrada: {e}")
