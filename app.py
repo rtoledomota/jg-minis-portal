@@ -16,7 +16,7 @@ app.secret_key = 'jg_minis_secret_key_2024'
 DB_FILE = 'jg_minis.db'
 SHEET_ID = '1sxlvo6j-UTB0xXuyivzWnhRuYvpJFcH2smL4ZzHTUps'
 SHEET_URL = f'https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv'
-LOGO_URL = 'https://imgur.com/seu-logo.png'
+LOGO_URL = 'https://i.imgur.com/8FJzK8X.png'
 
 def convert_drive_url(drive_url):
     """Converte links do Google Drive para acesso direto"""
@@ -44,7 +44,6 @@ def load_from_google_sheets():
         
         headers = [h.strip().upper() for h in rows[0]]
         
-        # Mapear colunas
         try:
             idx_imagem = headers.index('IMAGEM')
             idx_nome = headers.index('NOME DA MINIATURA')
@@ -60,7 +59,6 @@ def load_from_google_sheets():
         
         miniaturas = []
         for i, row in enumerate(rows[1:], start=2):
-            # Garantir que a linha tem células suficientes
             while len(row) < len(headers):
                 row.append('')
             
@@ -133,13 +131,11 @@ def init_db():
         FOREIGN KEY(miniatura_id) REFERENCES miniaturas(id)
     )''')
     
-    # Usuários padrão
     c.execute('INSERT INTO users (email, password, phone, is_admin, created_at) VALUES (?, ?, ?, ?, ?)',
               ('admin@example.com', generate_password_hash('admin123'), '11999999999', True, datetime.now().isoformat()))
     c.execute('INSERT INTO users (email, password, phone, is_admin, created_at) VALUES (?, ?, ?, ?, ?)',
               ('usuario@example.com', generate_password_hash('usuario123'), '11988888888', False, datetime.now().isoformat()))
     
-    # Carregar miniaturas
     miniaturas = load_from_google_sheets()
     if miniaturas:
         c.executemany('INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) VALUES (?, ?, ?, ?, ?, ?, ?)', miniaturas)
@@ -197,58 +193,61 @@ LOGIN_HTML = '''<!DOCTYPE html>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body class="bg-gradient-to-br from-orange-500 via-yellow-500 to-orange-600 min-h-screen flex items-center justify-center">
+<body class="bg-gradient-to-br from-slate-900 via-blue-900 to-black min-h-screen flex items-center justify-center">
     <div class="w-full max-w-md">
-        <div class="bg-white rounded-2xl shadow-2xl overflow-hidden">
-            <div class="bg-gradient-to-r from-orange-500 to-yellow-500 p-8 text-center">
-                <div class="w-24 h-24 bg-white rounded-xl flex items-center justify-center mx-auto mb-4 shadow-lg">
-                    <img src="{{ logo_url }}" alt="Logo" class="w-20 h-20 object-contain">
+        <div class="bg-gradient-to-b from-slate-800 to-black rounded-2xl shadow-2xl overflow-hidden border-2 border-red-600">
+            <div class="bg-gradient-to-r from-blue-700 via-blue-900 to-black p-8 text-center border-b-2 border-red-600">
+                <div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600">
+                    <img src="{{ logo_url }}" alt="Logo" class="w-28 h-28 object-contain">
                 </div>
-                <h2 class="text-3xl font-bold text-white mb-2">JG MINIS</h2>
-                <p class="text-orange-100">Portal de Miniaturas</p>
+                <h2 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">JG MINIS</h2>
+                <p class="text-blue-300 font-semibold">Portal de Miniaturas Premium</p>
             </div>
             <div class="p-8">
-                <div class="flex gap-4 mb-6 border-b">
-                    <button class="nav-tab active pb-4 px-4 font-bold text-orange-600 border-b-2 border-orange-600 cursor-pointer" onclick="switchTab('login')">Login</button>
-                    <button class="nav-tab pb-4 px-4 font-bold text-gray-500 cursor-pointer" onclick="switchTab('register')">Cadastro</button>
+                <div class="flex gap-4 mb-6 border-b border-slate-600">
+                    <button class="nav-tab active pb-4 px-4 font-bold text-red-500 border-b-2 border-red-500 cursor-pointer transition" onclick="switchTab('login')">Login</button>
+                    <button class="nav-tab pb-4 px-4 font-bold text-slate-400 cursor-pointer transition hover:text-blue-400" onclick="switchTab('register')">Cadastro</button>
                 </div>
                 <div id="login" class="tab-content">
-                    {% if error %}<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg mb-4">{{ error }}</div>{% endif %}
+                    {% if error %}<div class="bg-red-900 border border-red-600 text-red-200 px-4 py-3 rounded-lg mb-4 flex items-center gap-2"><i class="fas fa-exclamation-circle"></i>{{ error }}</div>{% endif %}
                     <form method="POST" action="/login">
                         <div class="mb-4">
-                            <label class="block text-gray-700 font-bold mb-2">Email</label>
-                            <input type="email" name="email" class="w-full border-2 border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:border-orange-500" required>
+                            <label class="block text-slate-300 font-bold mb-2">📧 Email</label>
+                            <input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition" required>
                         </div>
                         <div class="mb-6">
-                            <label class="block text-gray-700 font-bold mb-2">Senha</label>
-                            <input type="password" name="password" class="w-full border-2 border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:border-orange-500" required>
+                            <label class="block text-slate-300 font-bold mb-2">🔐 Senha</label>
+                            <input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition" required>
                         </div>
-                        <button type="submit" class="w-full bg-gradient-to-r from-orange-500 to-yellow-500 text-white font-bold py-3 rounded-lg hover:shadow-lg transition">Entrar</button>
+                        <button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700 text-white font-bold py-3 rounded-lg shadow-lg hover:shadow-2xl transition transform hover:scale-105">Entrar</button>
                     </form>
-                    <hr class="my-4">
-                    <p class="text-sm text-gray-600"><strong>Teste:</strong><br>admin@example.com / admin123<br>usuario@example.com / usuario123</p>
+                    <hr class="my-4 border-slate-600">
+                    <div class="bg-slate-900 p-3 rounded-lg border border-blue-600">
+                        <p class="text-sm text-slate-300"><strong class="text-blue-400">👤 Teste Admin:</strong><br><code class="text-green-400">admin@example.com</code><br><code class="text-green-400">admin123</code></p>
+                        <p class="text-sm text-slate-300 mt-2"><strong class="text-blue-400">👤 Teste User:</strong><br><code class="text-green-400">usuario@example.com</code><br><code class="text-green-400">usuario123</code></p>
+                    </div>
                 </div>
                 <div id="register" class="tab-content hidden">
-                    {% if register_error %}<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg mb-4">{{ register_error }}</div>{% endif %}
-                    {% if register_success %}<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-lg mb-4">{{ register_success }}</div>{% endif %}
+                    {% if register_error %}<div class="bg-red-900 border border-red-600 text-red-200 px-4 py-3 rounded-lg mb-4">{{ register_error }}</div>{% endif %}
+                    {% if register_success %}<div class="bg-green-900 border border-green-600 text-green-200 px-4 py-3 rounded-lg mb-4">{{ register_success }}</div>{% endif %}
                     <form method="POST" action="/register">
                         <div class="mb-4">
-                            <label class="block text-gray-700 font-bold mb-2">Email</label>
-                            <input type="email" name="email" class="w-full border-2 border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:border-orange-500" required>
+                            <label class="block text-slate-300 font-bold mb-2">📧 Email</label>
+                            <input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500 transition" required>
                         </div>
                         <div class="mb-4">
-                            <label class="block text-gray-700 font-bold mb-2">Telefone</label>
-                            <input type="tel" name="phone" class="w-full border-2 border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:border-orange-500" required>
+                            <label class="block text-slate-300 font-bold mb-2">📱 Telefone</label>
+                            <input type="tel" name="phone" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500 transition" required>
                         </div>
                         <div class="mb-4">
-                            <label class="block text-gray-700 font-bold mb-2">Senha</label>
-                            <input type="password" name="password" class="w-full border-2 border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:border-orange-500" minlength="6" required>
+                            <label class="block text-slate-300 font-bold mb-2">🔐 Senha</label>
+                            <input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500 transition" minlength="6" required>
                         </div>
                         <div class="mb-6">
-                            <label class="block text-gray-700 font-bold mb-2">Confirme a Senha</label>
-                            <input type="password" name="confirm_password" class="w-full border-2 border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:border-orange-500" minlength="6" required>
+                            <label class="block text-slate-300 font-bold mb-2">🔐 Confirme a Senha</label>
+                            <input type="password" name="confirm_password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-red-500 transition" minlength="6" required>
                         </div>
-                        <button type="submit" class="w-full bg-gradient-to-r from-orange-500 to-yellow-500 text-white font-bold py-3 rounded-lg hover:shadow-lg transition">Cadastrar</button>
+                        <button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700 text-white font-bold py-3 rounded-lg shadow-lg hover:shadow-2xl transition transform hover:scale-105">Cadastrar</button>
                     </form>
                 </div>
             </div>
@@ -258,8 +257,9 @@ LOGIN_HTML = '''<!DOCTYPE html>
         function switchTab(tab){
             document.querySelectorAll('.tab-content').forEach(e=>e.classList.add('hidden'));
             document.getElementById(tab).classList.remove('hidden');
-            document.querySelectorAll('.nav-tab').forEach(e=>e.classList.remove('border-b-2','border-orange-600','text-orange-600'));
-            event.target.classList.add('border-b-2','border-orange-600','text-orange-600');
+            document.querySelectorAll('.nav-tab').forEach(e=>{e.classList.remove('border-b-2','border-red-500','text-red-500'); e.classList.add('text-slate-400');});
+            event.target.classList.add('border-b-2','border-red-500','text-red-500');
+            event.target.classList.remove('text-slate-400');
         }
     </script>
 </body>
@@ -270,33 +270,43 @@ HOME_HTML = '''<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JG MINIS</title>
+    <title>JG MINIS - Catálogo</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body class="bg-gray-50">
-    <nav class="bg-gradient-to-r from-orange-500 to-yellow-500 shadow-lg sticky top-0 z-50">
+<body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen">
+    <nav class="bg-gradient-to-r from-blue-900 via-slate-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50">
         <div class="container mx-auto px-4 py-4 flex justify-between items-center">
-            <a href="/" class="flex items-center gap-3">
-                <div class="w-12 h-12 bg-white rounded-lg flex items-center justify-center shadow-md">
-                    <img src="{{ logo_url }}" alt="Logo" class="w-10 h-10 object-contain">
+            <a href="/" class="flex items-center gap-3 hover:opacity-80 transition">
+                <div class="w-14 h-14 bg-gradient-to-br from-blue-600 to-red-600 rounded-xl flex items-center justify-center shadow-lg border-2 border-blue-400">
+                    <img src="{{ logo_url }}" alt="Logo" class="w-12 h-12 object-contain">
                 </div>
-                <span class="text-2xl font-bold text-white">JG MINIS</span>
+                <div>
+                    <span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span>
+                    <p class="text-xs text-blue-300">Premium Miniatures</p>
+                </div>
             </a>
-            <div class="flex items-center gap-4">
+            <div class="flex items-center gap-6">
                 {% if is_admin %}
-                <a href="/admin" class="bg-white text-orange-600 font-bold px-4 py-2 rounded-lg hover:shadow-lg transition">
-                    <i class="fas fa-chart-bar mr-2"></i>Admin
+                <a href="/admin" class="bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white font-bold px-5 py-2 rounded-lg shadow-lg hover:shadow-2xl transition transform hover:scale-105 flex items-center gap-2">
+                    <i class="fas fa-chart-bar"></i>Admin Panel
                 </a>
                 {% endif %}
-                <span class="text-white font-semibold"><i class="fas fa-user mr-2"></i>{{ email }}</span>
-                <a href="/logout" class="bg-red-600 text-white font-bold px-4 py-2 rounded-lg hover:bg-red-700 transition">Sair</a>
+                <div class="bg-blue-900 bg-opacity-50 border border-blue-600 px-4 py-2 rounded-lg">
+                    <span class="text-slate-200 font-semibold"><i class="fas fa-user text-blue-400 mr-2"></i>{{ email }}</span>
+                </div>
+                <a href="/logout" class="bg-red-600 hover:bg-red-700 text-white font-bold px-5 py-2 rounded-lg shadow-lg hover:shadow-2xl transition transform hover:scale-105">
+                    <i class="fas fa-sign-out-alt mr-1"></i>Sair
+                </a>
             </div>
         </div>
     </nav>
     <div class="container mx-auto px-4 py-12">
-        <h1 class="text-4xl font-bold text-gray-900 mb-2"><i class="fas fa-cube text-orange-500 mr-3"></i>Catálogo de Miniaturas</h1>
-        <p class="text-gray-600 mb-8">Explore nossa coleção exclusiva</p>
+        <div class="mb-12 text-center">
+            <h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2"><i class="fas fa-cube text-red-500 mr-3"></i>Catálogo de Miniaturas</h1>
+            <p class="text-slate-300 text-lg">Explore nossa coleção exclusiva e premium</p>
+            <div class="w-24 h-1 bg-gradient-to-r from-blue-500 to-red-500 mx-auto mt-4 rounded"></div>
+        </div>
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             {{ miniaturas|safe }}
         </div>
@@ -313,18 +323,18 @@ ADMIN_HTML = '''<!DOCTYPE html>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body class="bg-gray-50">
-    <nav class="bg-gradient-to-r from-orange-500 to-yellow-500 shadow-lg">
+<body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen">
+    <nav class="bg-gradient-to-r from-blue-900 via-slate-900 to-black shadow-2xl border-b-4 border-red-600">
         <div class="container mx-auto px-4 py-4 flex justify-between items-center">
-            <h1 class="text-2xl font-bold text-white"><i class="fas fa-shield mr-2"></i>JG MINIS - Admin</h1>
-            <a href="/logout" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700">Sair</a>
+            <h1 class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500"><i class="fas fa-shield text-red-500 mr-3"></i>Painel Admin</h1>
+            <a href="/logout" class="bg-red-600 hover:bg-red-700 text-white font-bold px-5 py-2 rounded-lg shadow-lg hover:shadow-2xl transition">Sair</a>
         </div>
     </nav>
     <div class="container mx-auto px-4 py-8">
         <div class="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">
             {{ stats|safe }}
         </div>
-        <div class="bg-white rounded-lg shadow-lg p-6">
+        <div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-2xl p-8 border-2 border-blue-600">
             {{ content|safe }}
         </div>
     </div>
@@ -349,7 +359,7 @@ def login():
             response.set_cookie('token', token, httponly=True, max_age=86400)
             return response
         
-        return render_template_string(LOGIN_HTML, error='Email ou senha inválidos', register_error='', register_success='', logo_url=LOGO_URL)
+        return render_template_string(LOGIN_HTML, error='❌ Email ou senha inválidos', register_error='', register_success='', logo_url=LOGO_URL)
     
     return render_template_string(LOGIN_HTML, error='', register_error='', register_success='', logo_url=LOGO_URL)
 
@@ -361,23 +371,23 @@ def register():
     confirm = request.form.get('confirm_password', '')
     
     if password != confirm:
-        return render_template_string(LOGIN_HTML, error='', register_error='Senhas não conferem', register_success='', logo_url=LOGO_URL)
+        return render_template_string(LOGIN_HTML, error='', register_error='❌ Senhas não conferem', register_success='', logo_url=LOGO_URL)
     if len(password) < 6:
-        return render_template_string(LOGIN_HTML, error='', register_error='Mínimo 6 caracteres', register_success='', logo_url=LOGO_URL)
+        return render_template_string(LOGIN_HTML, error='', register_error='❌ Mínimo 6 caracteres', register_success='', logo_url=LOGO_URL)
     
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT id FROM users WHERE email = ?', (email,))
     if c.fetchone():
         conn.close()
-        return render_template_string(LOGIN_HTML, error='', register_error='Email já existe', register_success='', logo_url=LOGO_URL)
+        return render_template_string(LOGIN_HTML, error='', register_error='❌ Email já existe', register_success='', logo_url=LOGO_URL)
     
     c.execute('INSERT INTO users (email, password, phone, is_admin, created_at) VALUES (?, ?, ?, ?, ?)',
               (email, generate_password_hash(password), phone, False, datetime.now().isoformat()))
     conn.commit()
     conn.close()
     
-    return render_template_string(LOGIN_HTML, error='', register_error='', register_success='Cadastro realizado! Faça login agora.', logo_url=LOGO_URL)
+    return render_template_string(LOGIN_HTML, error='', register_error='', register_success='✅ Cadastro realizado! Faça login agora.', logo_url=LOGO_URL)
 
 @app.route('/logout')
 def logout():
@@ -396,23 +406,27 @@ def index():
     
     html = ''
     for m in miniaturas:
+        status_class = 'bg-green-600' if m[4] > 0 else 'bg-red-600'
+        status_text = f'{m[4]} em estoque' if m[4] > 0 else 'Indisponível'
+        button_disabled = 'opacity-50 cursor-not-allowed' if m[4] == 0 else ''
+        
         html += f'''
-        <div class="bg-white rounded-xl shadow-md hover:shadow-2xl transition-all duration-300 overflow-hidden group">
-            <div class="relative overflow-hidden bg-gray-200 h-64">
+        <div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg hover:shadow-2xl transition-all duration-300 overflow-hidden group border-2 border-blue-600 hover:border-red-500">
+            <div class="relative overflow-hidden bg-black h-64">
                 <img src="{m[1]}" class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" alt="{m[2]}" onerror="this.src='https://via.placeholder.com/300'">
-                <div class="absolute top-3 right-3 bg-orange-500 text-white px-3 py-1 rounded-full text-sm font-bold shadow-lg">
-                    {m[4]} em estoque
+                <div class="absolute top-3 right-3 {status_class} text-white px-3 py-1 rounded-full text-sm font-bold shadow-lg">
+                    {status_text}
                 </div>
             </div>
-            <div class="p-4">
-                <h3 class="font-bold text-lg text-gray-900 mb-2">{m[2]}</h3>
-                <div class="text-sm text-gray-600 mb-3 space-y-1">
-                    <p><i class="fas fa-calendar mr-2 text-orange-500"></i>Chegada: {m[3]}</p>
-                    <p><i class="fas fa-sticky-note mr-2 text-orange-500"></i>{m[6]}</p>
+            <div class="p-5">
+                <h3 class="font-bold text-lg text-slate-100 mb-2 group-hover:text-red-400 transition">{m[2]}</h3>
+                <div class="text-sm text-slate-400 mb-4 space-y-1 border-l-2 border-blue-600 pl-3">
+                    <p><i class="fas fa-calendar text-blue-400 mr-2"></i>Chegada: <span class="text-blue-300">{m[3]}</span></p>
+                    <p><i class="fas fa-sticky-note text-blue-400 mr-2"></i><span class="text-slate-300">{m[6]}</span></p>
                 </div>
-                <div class="border-t pt-3 mt-3 flex justify-between items-center">
-                    <span class="text-2xl font-bold text-orange-600">R$ {m[5]:.2f}</span>
-                    <button onclick="reservar({m[0]})" class="bg-gradient-to-r from-orange-500 to-yellow-500 text-white font-bold px-4 py-2 rounded-lg hover:shadow-lg transition">
+                <div class="border-t border-slate-700 pt-3 mt-3 flex justify-between items-center">
+                    <span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
+                    <button onclick="reservar({m[0]})" class="bg-gradient-to-r from-blue-600 to-red-600 hover:from-blue-700 hover:to-red-700 text-white font-bold px-4 py-2 rounded-lg hover:shadow-lg transition transform hover:scale-105 {button_disabled}" {'disabled' if m[4] == 0 else ''}>
                         <i class="fas fa-shopping-cart mr-1"></i>Reservar
                     </button>
                 </div>
@@ -436,28 +450,28 @@ def admin():
     total_clientes = c.fetchone()[0]
     
     stats = f'''
-    <div class="bg-gradient-to-br from-blue-500 to-blue-600 text-white p-6 rounded-lg shadow-lg">
+    <div class="bg-gradient-to-br from-blue-600 to-blue-800 text-white p-6 rounded-lg shadow-lg border-2 border-blue-400">
         <div class="flex items-center justify-between">
-            <div><p class="text-blue-100">Total de Reservas</p><p class="text-3xl font-bold">{total_reservas}</p></div>
-            <i class="fas fa-shopping-bag text-5xl opacity-20"></i>
+            <div><p class="text-blue-200 text-sm font-semibold">📦 Total de Reservas</p><p class="text-4xl font-black mt-2">{total_reservas}</p></div>
+            <i class="fas fa-shopping-bag text-6xl opacity-30"></i>
         </div>
     </div>
-    <div class="bg-gradient-to-br from-green-500 to-green-600 text-white p-6 rounded-lg shadow-lg">
+    <div class="bg-gradient-to-br from-green-600 to-green-800 text-white p-6 rounded-lg shadow-lg border-2 border-green-400">
         <div class="flex items-center justify-between">
-            <div><p class="text-green-100">Valor Total</p><p class="text-3xl font-bold">R$ {total_valor:.2f}</p></div>
-            <i class="fas fa-dollar-sign text-5xl opacity-20"></i>
+            <div><p class="text-green-200 text-sm font-semibold">💰 Valor Total</p><p class="text-4xl font-black mt-2">R$ {total_valor:.2f}</p></div>
+            <i class="fas fa-dollar-sign text-6xl opacity-30"></i>
         </div>
     </div>
-    <div class="bg-gradient-to-br from-purple-500 to-purple-600 text-white p-6 rounded-lg shadow-lg">
+    <div class="bg-gradient-to-br from-purple-600 to-purple-800 text-white p-6 rounded-lg shadow-lg border-2 border-purple-400">
         <div class="flex items-center justify-between">
-            <div><p class="text-purple-100">Total de Clientes</p><p class="text-3xl font-bold">{total_clientes}</p></div>
-            <i class="fas fa-users text-5xl opacity-20"></i>
+            <div><p class="text-purple-200 text-sm font-semibold">👥 Total de Clientes</p><p class="text-4xl font-black mt-2">{total_clientes}</p></div>
+            <i class="fas fa-users text-6xl opacity-30"></i>
         </div>
     </div>
-    <div class="bg-gradient-to-br from-orange-500 to-yellow-500 text-white p-6 rounded-lg shadow-lg">
+    <div class="bg-gradient-to-br from-red-600 to-red-800 text-white p-6 rounded-lg shadow-lg border-2 border-red-400">
         <div class="flex items-center justify-between">
-            <div><p class="text-orange-100">Ticket Médio</p><p class="text-3xl font-bold">R$ {(total_valor/total_reservas if total_reservas > 0 else 0):.2f}</p></div>
-            <i class="fas fa-chart-line text-5xl opacity-20"></i>
+            <div><p class="text-red-200 text-sm font-semibold">📊 Ticket Médio</p><p class="text-4xl font-black mt-2">R$ {(total_valor/total_reservas if total_reservas > 0 else 0):.2f}</p></div>
+            <i class="fas fa-chart-line text-6xl opacity-30"></i>
         </div>
     </div>
     '''
@@ -466,38 +480,18 @@ def admin():
     reservas = c.fetchall()
     conn.close()
     
-    html = '<h2 class="text-2xl font-bold mb-4">📋 Últimas Reservas</h2><div class="overflow-x-auto"><table class="w-full"><thead class="bg-gray-200"><tr><th class="p-3 text-left">Data</th><th class="p-3 text-left">Cliente</th><th class="p-3 text-left">Email</th><th class="p-3 text-left">Telefone</th><th class="p-3 text-left">Produto</th><th class="p-3 text-center">Qtd</th><th class="p-3 text-right">Valor</th></tr></thead><tbody>'
+    html = '<h2 class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-6">📋 Últimas Reservas</h2><div class="overflow-x-auto"><table class="w-full"><thead class="bg-gradient-to-r from-blue-700 to-blue-900 text-white"><tr><th class="p-3 text-left">Data</th><th class="p-3 text-left">Cliente</th><th class="p-3 text-left">Email</th><th class="p-3 text-left">Telefone</th><th class="p-3 text-left">Produto</th><th class="p-3 text-center">Qtd</th><th class="p-3 text-right">Valor</th></tr></thead><tbody>'
     
     total = 0
-    for r in reservas:
+    for idx, r in enumerate(reservas):
         valor = r[4] * r[5]
         total += valor
-        html += f'<tr class="border-b hover:bg-gray-50"><td class="p-3">{r[0][:10]}</td><td class="p-3 font-semibold">{r[1].split("@")[0]}</td><td class="p-3">{r[1]}</td><td class="p-3">{r[2]}</td><td class="p-3">{r[3]}</td><td class="p-3 text-center">{r[4]}</td><td class="p-3 text-right font-bold">R$ {valor:.2f}</td></tr>'
+        bg = 'bg-slate-700' if idx % 2 == 0 else 'bg-slate-800'
+        html += f'<tr class="{bg} border-b border-slate-600 hover:bg-blue-600 hover:bg-opacity-30 transition text-slate-200"><td class="p-3">{r[0][:10]}</td><td class="p-3 font-semibold text-blue-300">{r[1].split("@")[0]}</td><td class="p-3 text-slate-400">{r[1]}</td><td class="p-3 text-slate-400">{r[2]}</td><td class="p-3">{r[3]}</td><td class="p-3 text-center">{r[4]}</td><td class="p-3 text-right font-bold text-red-400">R$ {valor:.2f}</td></tr>'
     
-    html += f'<tr class="bg-orange-100 font-bold"><td colspan="6" class="p-3">TOTAL</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table></div>'
+    html += f'<tr class="bg-gradient-to-r from-blue-700 to-red-700 font-black text-white"><td colspan="6" class="p-3">TOTAL GERAL</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table></div>'
     
     return render_template_string(ADMIN_HTML, content=html, stats=stats)
-
-@app.route('/admin/usuarios')
-@admin_required
-def admin_usuarios():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, email, phone, is_admin, created_at FROM users ORDER BY created_at DESC')
-    usuarios = c.fetchall()
-    
-    html = '<h2 class="text-2xl font-bold mb-4">👥 Usuários do Sistema</h2><div class="overflow-x-auto"><table class="w-full"><thead class="bg-gray-200"><tr><th class="p-3 text-left">Email</th><th class="p-3 text-left">Telefone</th><th class="p-3 text-left">Cadastro</th><th class="p-3 text-left">Tipo</th><th class="p-3 text-center">Reservas</th></tr></thead><tbody>'
-    
-    for u in usuarios:
-        c.execute('SELECT COUNT(*) FROM reservations WHERE user_id = ?', (u[0],))
-        qtd = c.fetchone()[0]
-        tipo = '<span class="bg-orange-200 text-orange-800 px-3 py-1 rounded-full text-sm font-bold">Admin</span>' if u[3] else '<span class="bg-blue-200 text-blue-800 px-3 py-1 rounded-full text-sm font-bold">Usuário</span>'
-        html += f'<tr class="border-b hover:bg-gray-50"><td class="p-3 font-semibold">{u[1]}</td><td class="p-3">{u[2]}</td><td class="p-3">{u[4][:10]}</td><td class="p-3">{tipo}</td><td class="p-3 text-center">{qtd}</td></tr>'
-    
-    conn.close()
-    html += '</tbody></table></div>'
-    
-    return render_template_string(ADMIN_HTML, content=html, stats='')
 
 @app.route('/reservar', methods=['POST'])
 @login_required
