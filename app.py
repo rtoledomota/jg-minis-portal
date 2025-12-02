@@ -23,7 +23,6 @@ SHEET_URL = f'https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=cs
 LOGO_URL = 'https://i.imgur.com/Yp1OiWB.png'
 WHATSAPP_NUMERO = '5511949094290'
 
-# Configurar agendador
 scheduler = BackgroundScheduler()
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
@@ -45,7 +44,7 @@ def load_from_google_sheets():
         csv_reader = csv.reader(StringIO(response.text))
         rows = list(csv_reader)
         
-        if len(rows) &lt; 2:
+        if len(rows) < 2:
             print("❌ Planilha vazia")
             return None
         
@@ -65,7 +64,7 @@ def load_from_google_sheets():
         
         miniaturas = []
         for i, row in enumerate(rows[1:], start=2):
-            while len(row) &lt; len(headers):
+            while len(row) < len(headers):
                 row.append('')
             
             imagem = row[idx_imagem].strip()
@@ -92,8 +91,7 @@ def load_from_google_sheets():
         return None
 
 def atualizar_miniaturas():
-    """Atualiza miniaturas do Google Sheets"""
-    print(f"🔄 [SINCRONIZAÇÃO] {datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Buscando dados do Google Sheets...")
+    print(f"🔄 [SINCRONIZAÇÃO] {datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Buscando dados...")
     
     try:
         miniaturas = load_from_google_sheets()
@@ -105,18 +103,13 @@ def atualizar_miniaturas():
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         
-        # Limpar miniaturas antigas
         c.execute('DELETE FROM miniaturas')
-        
-        # Inserir novas
-        c.executemany('''INSERT INTO miniaturas 
-                         (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) 
-                         VALUES (?, ?, ?, ?, ?, ?, ?)''', miniaturas)
+        c.executemany('INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) VALUES (?, ?, ?, ?, ?, ?, ?)', miniaturas)
         
         conn.commit()
         conn.close()
         
-        print(f"✅ [SINCRONIZAÇÃO] {len(miniaturas)} miniaturas atualizadas com sucesso!\n")
+        print(f"✅ [SINCRONIZAÇÃO] {len(miniaturas)} miniaturas atualizadas!\n")
         return True
     except Exception as e:
         print(f"❌ Erro na sincronização: {e}\n")
@@ -264,7 +257,7 @@ def register():
     
     if not validate_phone(phone):
         return render_template_string(LOGIN_HTML, error='', register_error='Telefone inválido', logo_url=LOGO_URL)
-    if password != confirm or len(password) &lt; 8:
+    if password != confirm or len(password) < 8:
         return render_template_string(LOGIN_HTML, error='', register_error='Senhas inválidas', logo_url=LOGO_URL)
     
     conn = sqlite3.connect(DB_FILE)
@@ -297,7 +290,7 @@ def index():
     
     html = ''
     for m in miniaturas:
-        is_esgotado = m[4] &lt;= 0
+        is_esgotado = m[4] <= 0
         status_badge = 'bg-red-600 text-white px-3 py-1 rounded-full text-sm font-bold' if is_esgotado else 'bg-green-600 text-white px-3 py-1 rounded-full text-sm font-bold'
         status_text = '❌ ESGOTADO' if is_esgotado else f'✅ {m[4]} em estoque'
         
@@ -317,7 +310,6 @@ def index():
                         <span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
                     </div>
                     <div class="flex gap-2 mt-4">
-                        <button onclick="entrarFilaEspera({m[0]}, '{m[2]}')" class="flex-1 bg-gradient-to-r from-yellow-600 to-yellow-700 hover:from-yellow-700 hover:to-yellow-800 text-white font-bold px-3 py-2 rounded-lg transition text-sm"><i class="fas fa-hourglass-end mr-1"></i>Fila de Espera</button>
                         <a href="https://wa.me/{WHATSAPP_NUMERO}?text=Olá! Tenho interesse no produto: {m[2]}" target="_blank" class="flex-1 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-bold px-3 py-2 rounded-lg transition text-sm text-center"><i class="fas fa-whatsapp mr-1"></i>WhatsApp</a>
                     </div>
                 </div>
@@ -528,7 +520,7 @@ def reservar():
     
     try:
         quantidade = int(quantidade)
-        if quantidade &lt; 1:
+        if quantidade < 1:
             return jsonify({'error': 'Quantidade inválida'}), 400
     except:
         return jsonify({'error': 'Quantidade inválida'}), 400
@@ -538,7 +530,7 @@ def reservar():
     c.execute('SELECT stock, max_reservations_per_user FROM miniaturas WHERE id = ?', (miniatura_id,))
     m = c.fetchone()
     
-    if not m or m[0] &lt;= 0:
+    if not m or m[0] <= 0:
         conn.close()
         return jsonify({'error': 'Sem estoque'}), 400
     
@@ -571,13 +563,11 @@ def fila_espera():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # Verificar se já está na fila
     c.execute('SELECT id FROM fila_espera WHERE user_id = ? AND miniatura_id = ?', (user_id, miniatura_id))
     if c.fetchone():
         conn.close()
         return jsonify({'error': 'Você já está na fila de espera!'}), 400
     
-    # Adicionar à fila
     c.execute('INSERT INTO fila_espera (user_id, miniatura_id, created_at) VALUES (?, ?, ?)',
               (user_id, miniatura_id, datetime.now().isoformat()))
     conn.commit()
@@ -588,7 +578,6 @@ def fila_espera():
 @app.route('/sincronizar-agora', methods=['POST'])
 @admin_required
 def sincronizar_agora():
-    """Sincroniza miniaturas da planilha de forma manual"""
     try:
         resultado = atualizar_miniaturas()
         if resultado:
@@ -598,7 +587,6 @@ def sincronizar_agora():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# Agendar sincronização automática 1 vez ao dia às 00:00 (meia-noite)
 scheduler.add_job(atualizar_miniaturas, 'cron', hour=0, minute=0, id='sync_sheets')
 
 init_db()
