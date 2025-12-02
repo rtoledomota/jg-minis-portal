@@ -3,12 +3,16 @@ import sqlite3
 import jwt
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import Flask, render_template_string, request, jsonify, redirect, url_for
+from flask import Flask, render_template_string, request, jsonify, redirect, url_for, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 import re
 import requests
 import csv
-from io import StringIO
+from io import StringIO, BytesIO
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from apscheduler.schedulers.background import BackgroundScheduler
+import atexit
 
 app = Flask(__name__)
 app.secret_key = 'jg_minis_secret_key_2024'
@@ -17,6 +21,11 @@ DB_FILE = 'jg_minis.db'
 SHEET_ID = '1sxlvo6j-UTB0xXuyivzWnhRuYvpJFcH2smL4ZzHTUps'
 SHEET_URL = f'https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv'
 LOGO_URL = 'https://i.imgur.com/Yp1OiWB.png'
+
+# Configurar agendador
+scheduler = BackgroundScheduler()
+scheduler.start()
+atexit.register(lambda: scheduler.shutdown())
 
 def convert_drive_url(drive_url):
     if not drive_url or 'drive.google.com' not in drive_url:
@@ -29,13 +38,14 @@ def convert_drive_url(drive_url):
 
 def load_from_google_sheets():
     try:
-        print("📊 Carregando dados...")
+        print("📊 Carregando dados da planilha...")
         response = requests.get(SHEET_URL, timeout=10)
         response.encoding = 'utf-8'
         csv_reader = csv.reader(StringIO(response.text))
         rows = list(csv_reader)
         
         if len(rows) < 2:
+            print("❌ Planilha vazia")
             return None
         
         headers = [h.strip().upper() for h in rows[0]]
@@ -48,7 +58,8 @@ def load_from_google_sheets():
             idx_valor = headers.index('VALOR')
             idx_obs = headers.index('OBSERVAÇÕES')
             idx_max = headers.index('MAX_RESERVAS_POR_USUARIO')
-        except ValueError:
+        except ValueError as e:
+            print(f"❌ Coluna não encontrada: {e}")
             return None
         
         miniaturas = []
@@ -68,13 +79,45 @@ def load_from_google_sheets():
                 max_res = int(row[idx_max].strip() or 3)
                 url_convertida = convert_drive_url(imagem)
                 miniaturas.append((url_convertida, nome, row[idx_chegada].strip(), qtd, valor, row[idx_obs].strip(), max_res))
-            except:
+                print(f"  ✅ {nome} - R$ {valor:.2f} ({qtd} em estoque)")
+            except Exception as e:
+                print(f"  ⚠️ Linha {i}: Erro - {e}")
                 continue
         
+        print(f"✅ Total carregado: {len(miniaturas)} miniaturas\n")
         return miniaturas if miniaturas else None
     except Exception as e:
-        print(f"❌ Erro: {e}")
+        print(f"❌ Erro ao carregar planilha: {e}\n")
         return None
+
+def atualizar_miniaturas():
+    """Atualiza miniaturas do Google Sheets"""
+    print(f"🔄 [SINCRONIZAÇÃO] {datetime.now().strftime('%d/%m/%Y %H:%M:%S')} - Buscando dados do Google Sheets...")
+    
+    try:
+        miniaturas = load_from_google_sheets()
+        
+        if not miniaturas:
+            print("⚠️ Nenhuma miniatura carregada\n")
+            return
+        
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # Limpar miniaturas antigas
+        c.execute('DELETE FROM miniaturas')
+        
+        # Inserir novas
+        c.executemany('''INSERT INTO miniaturas 
+                         (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?)''', miniaturas)
+        
+        conn.commit()
+        conn.close()
+        
+        print(f"✅ [SINCRONIZAÇÃO] {len(miniaturas)} miniaturas atualizadas com sucesso!\n")
+    except Exception as e:
+        print(f"❌ Erro na sincronização: {e}\n")
 
 def format_phone(phone):
     phone = re.sub(r'\D', '', phone)
@@ -135,7 +178,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print("✅ BD inicializado")
+    print("✅ BD inicializado\n")
 
 def get_token(user_id, is_admin):
     return jwt.encode({'user_id': user_id, 'is_admin': is_admin, 'exp': datetime.utcnow() + timedelta(hours=24)}, app.secret_key, algorithm='HS256')
@@ -339,7 +382,7 @@ def admin():
     for mini in miniaturas_list:
         selected = 'selected' if str(mini[0]) == miniatura_filter else ''
         filtros += f'<option value="{mini[0]}" {selected}>{mini[1]}</option>'
-    filtros += '</select><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-bold"><i class="fas fa-filter mr-2"></i>Filtrar</button><a href="/admin" class="bg-slate-600 hover:bg-slate-500 text-white px-4 py-2 rounded-lg font-bold">Limpar</a></form></div>'
+    filtros += '</select><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-bold"><i class="fas fa-filter mr-2"></i>Filtrar</button><a href="/admin" class="bg-slate-600 hover:bg-slate-500 text-white px-4 py-2 rounded-lg font-bold">Limpar</a><a href="/exportar-excel" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-bold"><i class="fas fa-download mr-2"></i>📊 Exportar Excel</a></form></div>'
     
     html = filtros
     html += '<h2 class="text-3xl font-black text-blue-400 mb-6"><i class="fas fa-list mr-2"></i>Reservas</h2>'
@@ -355,6 +398,90 @@ def admin():
     html += f'<tr class="bg-gradient-to-r from-blue-700 to-red-700 font-black text-white"><td colspan="6" class="p-3 text-right">TOTAL GERAL</td><td class="p-3 text-right">R$ {total:.2f}</td></tr></tbody></table></div>'
     
     return render_template_string(ADMIN_HTML, content=html, stats=stats)
+
+@app.route('/exportar-excel')
+@admin_required
+def exportar_excel():
+    cliente_filter = request.args.get('cliente', '')
+    miniatura_filter = request.args.get('miniatura', '')
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    query = 'SELECT r.created_at, u.name, u.email, u.phone, m.name, r.quantity, m.price FROM reservations r JOIN users u ON r.user_id = u.id JOIN miniaturas m ON r.miniatura_id = m.id WHERE 1=1'
+    params = []
+    
+    if cliente_filter:
+        query += ' AND u.id = ?'
+        params.append(cliente_filter)
+    if miniatura_filter:
+        query += ' AND m.id = ?'
+        params.append(miniatura_filter)
+    
+    query += ' ORDER BY r.created_at DESC'
+    
+    c.execute(query, params)
+    reservas = c.fetchall()
+    conn.close()
+    
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Reservas"
+    
+    header_fill = PatternFill(start_color="1e40af", end_color="1e40af", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=12)
+    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    center_alignment = Alignment(horizontal='center', vertical='center')
+    currency_format = '"R$"\ #,##0.00'
+    
+    headers = ['Data', 'Cliente', 'Email', 'Telefone', 'Produto', 'Quantidade', 'Valor Unitário', 'Total']
+    ws.append(headers)
+    
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center_alignment
+        cell.border = border
+    
+    total_geral = 0
+    for r in reservas:
+        subtotal = r[5] * r[6]
+        total_geral += subtotal
+        ws.append([r[0][:10], r[1], r[2], r[3], r[4], r[5], r[6], subtotal])
+    
+    for row in ws.iter_rows(min_row=2, max_row=len(reservas)+1, min_col=1, max_col=8):
+        for cell in row:
+            cell.border = border
+            if cell.column in [6, 7, 8]:
+                cell.alignment = center_alignment
+            if cell.column in [7, 8]:
+                cell.number_format = currency_format
+    
+    ultima_linha = len(reservas) + 2
+    ws[f'A{ultima_linha}'] = 'TOTAL GERAL'
+    ws[f'H{ultima_linha}'] = total_geral
+    
+    for cell in ws[ultima_linha]:
+        cell.fill = PatternFill(start_color="dc2626", end_color="dc2626", fill_type="solid")
+        cell.font = Font(bold=True, color="FFFFFF", size=12)
+        cell.border = border
+    
+    ws[f'H{ultima_linha}'].number_format = currency_format
+    
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 20
+    ws.column_dimensions['C'].width = 25
+    ws.column_dimensions['D'].width = 18
+    ws.column_dimensions['E'].width = 25
+    ws.column_dimensions['F'].width = 12
+    ws.column_dimensions['G'].width = 15
+    ws.column_dimensions['H'].width = 15
+    
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name=f'reservas_jgminis_{datetime.now().strftime("%d_%m_%Y")}.xlsx')
 
 @app.route('/reservar', methods=['POST'])
 @login_required
@@ -398,6 +525,9 @@ def reservar():
     conn.close()
     
     return jsonify({'success': True})
+
+# Agendar sincronização 1 vez ao dia às 00:00 (meia-noite)
+scheduler.add_job(atualizar_miniaturas, 'cron', hour=0, minute=0, id='sync_sheets')
 
 init_db()
 
