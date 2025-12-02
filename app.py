@@ -175,6 +175,19 @@ def init_db():
         FOREIGN KEY(user_id) REFERENCES users(id), 
         FOREIGN KEY(miniatura_id) REFERENCES miniaturas(id)
     )''')
+
+    # Nova tabela waiting_list
+    c.execute('''CREATE TABLE IF NOT EXISTS waiting_list (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER,
+        miniatura_id INTEGER,
+        email TEXT,
+        phone TEXT,
+        created_at TEXT,
+        notified BOOLEAN DEFAULT FALSE,
+        FOREIGN KEY(user_id) REFERENCES users(id),
+        FOREIGN KEY(miniatura_id) REFERENCES miniaturas(id)
+    )''')
     
     c.execute('SELECT COUNT(*) FROM users')
     if c.fetchone()[0] == 0:
@@ -242,9 +255,8 @@ def login():
             return response
         return redirect(url_for('login'))
     
-    # HTML da página de login com a linha do admin removida
     html = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-br from-slate-900 via-blue-900 to-black min-h-screen flex items-center justify-center"><div class="w-full max-w-md"><div class="bg-gradient-to-b from-slate-800 to-black rounded-2xl shadow-2xl overflow-hidden border-2 border-red-600"><div class="bg-gradient-to-r from-blue-700 via-blue-900 to-black p-8 text-center border-b-2 border-red-600"><div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600 overflow-hidden"><img src="LOGO_URL" alt="Logo" class="w-full h-full object-contain p-2"></div><h2 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">JG MINIS</h2><p class="text-blue-300 font-semibold">Portal de Miniaturas Premium</p></div><div class="p-8"><div class="flex gap-4 mb-6 border-b border-slate-600"><button class="nav-tab active pb-4 px-4 font-bold text-red-500 border-b-2 border-red-500 cursor-pointer" onclick="switchTab('login')">Login</button><button class="nav-tab pb-4 px-4 font-bold text-slate-400 cursor-pointer hover:text-blue-400" onclick="switchTab('register')">Cadastro</button></div><div id="login" class="tab-content"><form method="POST" action="/login"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">Senha</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Entrar</button></form></div><div id="register" class="tab-content hidden"><form method="POST" action="/register"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Nome</label><input type="text" name="name" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Telefone</label><input type="tel" name="phone" placeholder="(11) 99999-9999" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Senha</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">Confirme Senha</label><input type="password" name="confirm_password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Cadastrar</button></form></div></div></div><script>function switchTab(t){document.querySelectorAll(".tab-content").forEach(e=>e.classList.add("hidden"));document.getElementById(t).classList.remove("hidden");}</script></body></html>"""
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-br from-slate-900 via-blue-900 to-black min-h-screen flex items-center justify-center"><div class="w-full max-w-md"><div class="bg-gradient-to-b from-slate-800 to-black rounded-2xl shadow-2xl overflow-hidden border-2 border-red-600"><div class="bg-gradient-to-r from-blue-700 via-blue-900 to-black p-8 text-center border-b-2 border-red-600"><div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600 overflow-hidden"><img src="LOGO_URL" alt="Logo" class="w-full h-full object-contain p-2"></div><h2 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">JG MINIS</h2><p class="text-blue-300 font-semibold">Portal de Miniaturas Premium</p></div><div class="p-8"><div class="flex gap-4 mb-6 border-b border-slate-600"><button class="nav-tab active pb-4 px-4 font-bold text-red-500 border-b-2 border-red-500 cursor-pointer" onclick="switchTab('login')">Login</button><button class="nav-tab pb-4 px-4 font-bold text-slate-400 cursor-pointer hover:text-blue-400" onclick="switchTab('register')">Cadastro</button></div><div id="login" class="tab-content"><form method="POST" action="/login"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">Senha</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Entrar</button></form></div><div id="register" class="tab-content hidden"><form method="POST" action="/register"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Nome</label><input type="text" name="name" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Email</label><input type="email" name="email" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Telefone</label><input type="tel" name="phone" placeholder="(11) 99999-9999" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Senha</label><input type="password" name="password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><div class="mb-6"><label class="block text-slate-300 font-bold mb-2">Confirme Senha</label><input type="password" name="confirm_password" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" minlength="8" required></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-3 rounded-lg">Cadastrar</button></form></div></div></div></div><script>function switchTab(t){document.querySelectorAll(".tab-content").forEach(e=>e.classList.add("hidden"));document.getElementById(t).classList.remove("hidden");}</script></body></html>"""
     return html.replace('LOGO_URL', LOGO_URL)
 
 @app.route('/register', methods=['POST'])
@@ -286,6 +298,12 @@ def index():
     c = conn.cursor()
     c.execute('SELECT id, image_url, name, arrival_date, stock, price, observations, max_reservations_per_user FROM miniaturas')
     miniaturas = c.fetchall()
+    
+    user_id = request.user.get('user_id')
+    c.execute('SELECT name, email, phone FROM users WHERE id = ?', (user_id,))
+    user_data = c.fetchone()
+    user_name, user_email, user_phone = user_data if user_data else ('', '', '')
+    
     conn.close()
     
     items_html = ""
@@ -295,7 +313,13 @@ def index():
         status_color = "red" if is_esgotado else "green"
         
         nome_json = json.dumps(m[2])
-        button_html = "" if is_esgotado else f'<button onclick="abrirConfirmacao({m[0]}, {nome_json}, {m[5]}, {m[4]}, {m[7]})" class="bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold px-4 py-2 rounded-lg">Reservar</button>'
+        
+        button_html = ""
+        if is_esgotado:
+            whatsapp_link = f"https://wa.me/{WHATSAPP_NUMERO}?text=Olá%20JG%20MINIS,%20gostaria%20de%20informações%20sobre%20a%20miniatura:%20{m[2]}"
+            button_html = f'<a href="{whatsapp_link}" target="_blank" class="bg-orange-600 hover:bg-orange-700 text-white font-bold px-4 py-2 rounded-lg">Entrar em Contato</a>'
+        else:
+            button_html = f'<button onclick="abrirConfirmacao({m[0]}, {nome_json}, {m[5]}, {m[4]}, {m[7]})" class="bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold px-4 py-2 rounded-lg">Reservar</button>'
         
         items_html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 overflow-hidden">
 <div class="bg-black h-48 flex items-center justify-center relative overflow-hidden">
@@ -313,14 +337,22 @@ def index():
 </div>
 </div>'''
     
-    admin_buttons = ''
+    admin_links = ''
     if request.user.get('is_admin'):
-        admin_buttons = '<a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a><a href="/pessoas" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Pessoas</a>'
+        admin_links = f'''
+            <a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a>
+            <a href="/pessoas" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Pessoas</a>
+            <a href="/lista-espera" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">Lista de Espera</a>
+        '''
     
     page = f'''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4">{admin_buttons}<a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Minhas Reservas</a><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">Catalogo de Miniaturas</h1><p class="text-slate-300 mb-8">Pre vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">{items_html}</div></div><div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8"><h2 class="text-2xl font-black text-blue-400 mb-4">Confirmar Reserva</h2><div id="confirmContent" class="text-slate-300 mb-6 space-y-3"></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Quantidade:</label><div class="flex gap-2"><button type="button" onclick="decrementarQtd()" class="bg-red-600 text-white font-bold w-12 h-12 rounded-lg">-</button><input type="number" id="quantidadeInput" value="1" min="1" class="flex-1 bg-slate-700 text-white font-bold text-center rounded-lg border-2 border-blue-600"><button type="button" onclick="incrementarQtd()" class="bg-green-600 text-white font-bold w-12 h-12 rounded-lg">+</button></div></div><div class="flex gap-4"><button onclick="fecharModal()" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg">Cancelar</button><button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Confirmar</button></div></div></div><script>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Minhas Reservas</a>{admin_links}<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">Catalogo de Miniaturas</h1><p class="text-slate-300 mb-8">Pre vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">{items_html}</div></div><div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8"><h2 class="text-2xl font-black text-blue-400 mb-4">Confirmar Reserva</h2><div id="confirmContent" class="text-slate-300 mb-6 space-y-3"></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Quantidade:</label><div class="flex gap-2"><button type="button" onclick="decrementarQtd()" class="bg-red-600 text-white font-bold w-12 h-12 rounded-lg">-</button><input type="number" id="quantidadeInput" value="1" min="1" class="flex-1 bg-slate-700 text-white font-bold text-center rounded-lg border-2 border-blue-600"><button type="button" onclick="incrementarQtd()" class="bg-green-600 text-white font-bold w-12 h-12 rounded-lg">+</button></div></div><div class="flex gap-4"><button onclick="fecharModal()" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg">Cancelar</button><button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Confirmar</button></div></div></div><script>
 let reservaAtual = null;
 let maxQtd = 1;
+let userId = {user_id};
+let userEmail = "{user_email}";
+let userPhone = "{user_phone}";
+
 function abrirConfirmacao(id, nome, preco, stock, max) {{
   reservaAtual = id;
   maxQtd = Math.min(stock, max);
@@ -362,7 +394,7 @@ function confirmarReserva() {{
 }}
 </script></body></html>'''
     
-    return page
+    return page.format(user_id=user_id, user_email=user_email, user_phone=user_phone)
 
 @app.route('/minhas-reservas')
 @login_required
@@ -543,27 +575,122 @@ def editar_pessoa(user_id):
     if not user:
         return redirect('/pessoas')
     
-    checked = "checked" if user[4] else ""
-    
     return f'''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Editar Pessoa</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 min-h-screen"><nav class="bg-blue-900 border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between"><span class="text-3xl font-black text-red-400">JG MINIS</span><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded">Sair</a></div></nav><div class="container mx-auto px-4 py-8 max-w-md"><div class="bg-slate-800 rounded-xl p-8 border-2 border-blue-600"><h1 class="text-2xl font-black text-blue-400 mb-6">Editar: {user[1]}</h1><form method="POST"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Nome</label><input type="text" name="name" value="{user[1]}" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Email (não editável)</label><input type="text" value="{user[2]}" class="w-full border-2 border-slate-600 bg-slate-700 text-slate-400 rounded-lg px-4 py-2" disabled></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Telefone</label><input type="tel" name="phone" value="{user[3]}" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-6"><label class="flex items-center gap-3"><input type="checkbox" name="is_admin" {checked} class="w-5 h-5"><span class="text-slate-300 font-bold">É Administrador?</span></label></div><div class="flex gap-4"><a href="/pessoas" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg text-center">Cancelar</a><button type="submit" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Salvar</button></div></form></div></div></body></html>'''
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Editar Pessoa</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 min-h-screen"><nav class="bg-blue-900 border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between"><span class="text-3xl font-black text-red-400">JG MINIS</span><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded">Sair</a></div></nav><div class="container mx-auto px-4 py-8 max-w-md"><div class="bg-slate-800 rounded-xl p-8 border-2 border-blue-600"><h1 class="text-2xl font-black text-blue-400 mb-6">Editar: {user[1]}</h1><form method="POST"><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Nome</label><input type="text" name="name" value="{user[1]}" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Email (não editável)</label><input type="text" value="{user[2]}" class="w-full border-2 border-slate-600 bg-slate-700 text-slate-400 rounded-lg px-4 py-2" disabled></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Telefone</label><input type="tel" name="phone" value="{user[3]}" class="w-full border-2 border-blue-600 bg-slate-900 text-white rounded-lg px-4 py-2" required></div><div class="mb-6"><label class="flex items-center gap-3"><input type="checkbox" name="is_admin" {"checked" if user[4] else ""} class="w-5 h-5"><span class="text-slate-300 font-bold">É Administrador?</span></label></div><div class="flex gap-4"><a href="/pessoas" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg text-center">Cancelar</a><button type="submit" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Salvar</button></div></form></div></div></body></html>'''
 
 @app.route('/deletar-pessoa/<int:user_id>', methods=['POST'])
 @admin_required
 def deletar_pessoa(user_id):
+    # Não deleta o próprio admin logado
     if request.user.get('user_id') == user_id:
         return jsonify({'success': False, 'error': 'Não pode deletar sua própria conta'}), 400
     
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
+    # Deleta as reservas da pessoa primeiro
     c.execute('DELETE FROM reservations WHERE user_id = ?', (user_id,))
+    # Deleta da lista de espera
+    c.execute('DELETE FROM waiting_list WHERE user_id = ?', (user_id,))
+    # Depois deleta a pessoa
     c.execute('DELETE FROM users WHERE id = ?', (user_id,))
     
     conn.commit()
     conn.close()
     
     return jsonify({'success': True})
+
+@app.route('/entrar-lista-espera', methods=['POST'])
+@login_required
+def entrar_lista_espera():
+    data = request.get_json()
+    miniatura_id = data.get('miniatura_id')
+    user_id = request.user.get('user_id')
+    email = data.get('email')
+    phone = data.get('phone')
+
+    if not all([miniatura_id, user_id, email, phone]):
+        return jsonify({'success': False, 'error': 'Dados incompletos'}), 400
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # Verifica se já está na lista de espera para esta miniatura
+    c.execute('SELECT id FROM waiting_list WHERE user_id = ? AND miniatura_id = ?', (user_id, miniatura_id))
+    if c.fetchone():
+        conn.close()
+        return jsonify({'success': False, 'error': 'Você já está na lista de espera para esta miniatura.'}), 409
+
+    try:
+        c.execute('INSERT INTO waiting_list (user_id, miniatura_id, email, phone, created_at, notified) VALUES (?, ?, ?, ?, ?, ?)',
+                  (user_id, miniatura_id, email, phone, datetime.now().isoformat(), False))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True, 'message': 'Adicionado à lista de espera com sucesso!'})
+    except Exception as e:
+        conn.close()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/lista-espera')
+@admin_required
+def lista_espera():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        SELECT 
+            wl.id, u.name, u.email, u.phone, m.name, wl.created_at, wl.notified
+        FROM 
+            waiting_list wl
+        JOIN 
+            users u ON wl.user_id = u.id
+        JOIN 
+            miniaturas m ON wl.miniatura_id = m.id
+        ORDER BY 
+            wl.created_at DESC
+    ''')
+    espera = c.fetchall()
+    conn.close()
+
+    espera_html = '<table class="w-full text-slate-200 text-sm"><thead class="bg-blue-700"><tr><th class="p-3 text-left">Nome</th><th class="p-3 text-left">Email</th><th class="p-3 text-left">Telefone</th><th class="p-3 text-left">Produto</th><th class="p-3 text-left">Data Cadastro</th><th class="p-3 text-center">Notificado</th><th class="p-3 text-center">Ações</th></tr></thead><tbody>'
+    
+    for idx, item in enumerate(espera):
+        bg = 'bg-slate-700' if idx % 2 == 0 else 'bg-slate-800'
+        notified_status = '✅ Sim' if item[6] else '❌ Não'
+        espera_html += f'<tr class="{bg}"><td class="p-3">{item[1]}</td><td class="p-3">{item[2]}</td><td class="p-3">{item[3]}</td><td class="p-3">{item[4]}</td><td class="p-3">{item[5][:10]}</td><td class="p-3 text-center">{notified_status}</td><td class="p-3 text-center"><button onclick="deletarDaLista({item[0]}, \'{item[1]}\', \'{item[4]}\')" class="bg-red-600 text-white px-3 py-1 rounded">Deletar</button></td></tr>'
+    
+    espera_html += '</tbody></table>'
+
+    return f'''<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Lista de Espera</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-950 min-h-screen"><nav class="bg-blue-900 border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between"><span class="text-3xl font-black text-red-400">JG MINIS</span><div class="flex gap-4"><a href="/" class="bg-blue-600 text-white px-4 py-2 rounded">Catálogo</a><a href="/admin" class="bg-purple-600 text-white px-4 py-2 rounded">Admin</a><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded">Sair</a></div></div></nav><div class="container mx-auto px-4 py-8"><h1 class="text-4xl font-black text-blue-400 mb-8">Lista de Espera</h1><div class="bg-slate-800 rounded-xl p-8 border-2 border-blue-600 overflow-x-auto">{espera_html}</div></div><script>
+function deletarDaLista(id, nomeUsuario, nomeMiniatura) {{
+  if (confirm("Tem certeza que quer remover " + nomeUsuario + " da lista de espera para " + nomeMiniatura + "?")) {{
+    fetch("/deletar-lista-espera/" + id, {{method: "POST"}})
+    .then(r => r.json())
+    .then(data => {{
+      if (data.success) {{
+        alert("OK Removido da lista de espera!");
+        location.reload();
+      }} else {{
+        alert("ERRO: " + data.error);
+      }}
+    }}).catch(e => alert("ERRO"));
+  }}
+}}
+</script></body></html>'''
+
+@app.route('/deletar-lista-espera/<int:item_id>', methods=['POST'])
+@admin_required
+def deletar_lista_espera(item_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute('DELETE FROM waiting_list WHERE id = ?', (item_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'success': True})
+    except Exception as e:
+        conn.close()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 scheduler.add_job(atualizar_miniaturas, 'cron', hour=0, minute=0, id='sync_sheets')
 
