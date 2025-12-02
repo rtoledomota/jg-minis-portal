@@ -45,7 +45,7 @@ def load_from_google_sheets():
         csv_reader = csv.reader(StringIO(response.text))
         rows = list(csv_reader)
         
-        if len(rows) < 2:
+        if len(rows) &lt; 2:
             print("❌ Planilha vazia")
             return None
         
@@ -65,7 +65,7 @@ def load_from_google_sheets():
         
         miniaturas = []
         for i, row in enumerate(rows[1:], start=2):
-            while len(row) < len(headers):
+            while len(row) &lt; len(headers):
                 row.append('')
             
             imagem = row[idx_imagem].strip()
@@ -100,7 +100,7 @@ def atualizar_miniaturas():
         
         if not miniaturas:
             print("⚠️ Nenhuma miniatura carregada\n")
-            return
+            return False
         
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -117,8 +117,10 @@ def atualizar_miniaturas():
         conn.close()
         
         print(f"✅ [SINCRONIZAÇÃO] {len(miniaturas)} miniaturas atualizadas com sucesso!\n")
+        return True
     except Exception as e:
         print(f"❌ Erro na sincronização: {e}\n")
+        return False
 
 def format_phone(phone):
     phone = re.sub(r'\D', '', phone)
@@ -232,7 +234,7 @@ MINHAS_RESERVAS_HTML = '''<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Minhas Reservas</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg"><i class="fas fa-home mr-2"></i>Catálogo</a><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-4xl font-black text-blue-400 mb-8"><i class="fas fa-list mr-2"></i>Minhas Reservas</h1><div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl p-8 border-2 border-blue-600">{{ content|safe }}</div></div></body></html>'''
 
 ADMIN_HTML = '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-blue-400"><i class="fas fa-shield mr-2"></i>Admin</span><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg">Sair</a></div></nav><div class="container mx-auto px-4 py-8"><div class="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">{{ stats|safe }}</div><div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-2xl p-8 border-2 border-blue-600">{{ content|safe }}</div></div></body></html>'''
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-blue-400"><i class="fas fa-shield mr-2"></i>Admin</span><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg">Sair</a></div></nav><div class="container mx-auto px-4 py-8"><div class="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">{{ stats|safe }}</div><div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-2xl p-8 border-2 border-blue-600">{{ content|safe }}</div></div><script>function sincronizarAgora(){fetch('/sincronizar-agora',{method:'POST',headers:{'Content-Type':'application/json'}}).then(r=>r.json()).then(data=>{if(data.success){alert('✅ Sincronização realizada com sucesso!');location.reload();}else{alert('❌ Erro: '+data.error);}}).catch(e=>{alert('❌ Erro na sincronização');});}</script></body></html>'''
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -262,7 +264,7 @@ def register():
     
     if not validate_phone(phone):
         return render_template_string(LOGIN_HTML, error='', register_error='Telefone inválido', logo_url=LOGO_URL)
-    if password != confirm or len(password) < 8:
+    if password != confirm or len(password) &lt; 8:
         return render_template_string(LOGIN_HTML, error='', register_error='Senhas inválidas', logo_url=LOGO_URL)
     
     conn = sqlite3.connect(DB_FILE)
@@ -295,7 +297,7 @@ def index():
     
     html = ''
     for m in miniaturas:
-        is_esgotado = m[4] <= 0
+        is_esgotado = m[4] &lt;= 0
         status_badge = 'bg-red-600 text-white px-3 py-1 rounded-full text-sm font-bold' if is_esgotado else 'bg-green-600 text-white px-3 py-1 rounded-full text-sm font-bold'
         status_text = '❌ ESGOTADO' if is_esgotado else f'✅ {m[4]} em estoque'
         
@@ -407,7 +409,7 @@ def admin():
     reservas = c.fetchall()
     conn.close()
     
-    filtros = '<div class="mb-6 p-4 bg-slate-700 rounded-lg"><form method="GET" class="flex gap-4 flex-wrap"><select name="cliente" class="bg-slate-600 text-white px-4 py-2 rounded-lg border border-blue-500"><option value="">👥 Todos os Clientes</option>'
+    filtros = '<div class="mb-6 p-4 bg-slate-700 rounded-lg"><div class="flex gap-4 flex-wrap"><button onclick="sincronizarAgora()" class="bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 text-white px-6 py-2 rounded-lg font-bold transition"><i class="fas fa-sync-alt mr-2"></i>🔄 Sincronizar Agora</button><form method="GET" class="flex gap-4 flex-wrap flex-1"><select name="cliente" class="bg-slate-600 text-white px-4 py-2 rounded-lg border border-blue-500"><option value="">👥 Todos os Clientes</option>'
     for cli in clientes:
         selected = 'selected' if str(cli[0]) == cliente_filter else ''
         filtros += f'<option value="{cli[0]}" {selected}>{cli[1]}</option>'
@@ -415,7 +417,7 @@ def admin():
     for mini in miniaturas_list:
         selected = 'selected' if str(mini[0]) == miniatura_filter else ''
         filtros += f'<option value="{mini[0]}" {selected}>{mini[1]}</option>'
-    filtros += '</select><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-bold"><i class="fas fa-filter mr-2"></i>Filtrar</button><a href="/admin" class="bg-slate-600 hover:bg-slate-500 text-white px-4 py-2 rounded-lg font-bold">Limpar</a><a href="/exportar-excel" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-bold"><i class="fas fa-download mr-2"></i>📊 Exportar Excel</a></form></div>'
+    filtros += '</select><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-bold"><i class="fas fa-filter mr-2"></i>Filtrar</button><a href="/admin" class="bg-slate-600 hover:bg-slate-500 text-white px-4 py-2 rounded-lg font-bold">Limpar</a><a href="/exportar-excel" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-bold"><i class="fas fa-download mr-2"></i>📊 Exportar Excel</a></form></div></div>'
     
     html = filtros
     html += '<h2 class="text-3xl font-black text-blue-400 mb-6"><i class="fas fa-list mr-2"></i>Reservas</h2>'
@@ -526,7 +528,7 @@ def reservar():
     
     try:
         quantidade = int(quantidade)
-        if quantidade < 1:
+        if quantidade &lt; 1:
             return jsonify({'error': 'Quantidade inválida'}), 400
     except:
         return jsonify({'error': 'Quantidade inválida'}), 400
@@ -536,7 +538,7 @@ def reservar():
     c.execute('SELECT stock, max_reservations_per_user FROM miniaturas WHERE id = ?', (miniatura_id,))
     m = c.fetchone()
     
-    if not m or m[0] <= 0:
+    if not m or m[0] &lt;= 0:
         conn.close()
         return jsonify({'error': 'Sem estoque'}), 400
     
@@ -583,7 +585,20 @@ def fila_espera():
     
     return jsonify({'success': True})
 
-# Agendar sincronização 1 vez ao dia às 00:00 (meia-noite)
+@app.route('/sincronizar-agora', methods=['POST'])
+@admin_required
+def sincronizar_agora():
+    """Sincroniza miniaturas da planilha de forma manual"""
+    try:
+        resultado = atualizar_miniaturas()
+        if resultado:
+            return jsonify({'success': True, 'message': 'Sincronização realizada com sucesso!'})
+        else:
+            return jsonify({'success': False, 'error': 'Erro ao sincronizar miniaturas'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# Agendar sincronização automática 1 vez ao dia às 00:00 (meia-noite)
 scheduler.add_job(atualizar_miniaturas, 'cron', hour=0, minute=0, id='sync_sheets')
 
 init_db()
