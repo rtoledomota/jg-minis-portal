@@ -16,18 +16,16 @@ app.secret_key = 'jg_minis_secret_key_2024'
 DB_FILE = 'jg_minis.db'
 SHEET_ID = '1sxlvo6j-UTB0xXuyivzWnhRuYvpJFcH2smL4ZzHTUps'
 SHEET_URL = f'https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv'
-LOGO_URL = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"%3E%3Crect fill="%231e40af" width="200" height="200"/%3E%3Ctext x="50%" y="50%" font-size="40" font-weight="bold" fill="white" text-anchor="middle" dominant-baseline="middle"%3EJG%3C/text%3E%3Crect x="10" y="120" width="180" height="4" fill="%23dc2626"/%3E%3C/svg%3E'
+LOGO_URL = 'https://i.imgur.com/Yp1OiWB.png'
 
 def convert_drive_url(drive_url):
     """Converte links do Google Drive para acesso direto e público"""
     if not drive_url or 'drive.google.com' not in drive_url:
         return drive_url
     
-    # Extrai o ID do arquivo de qualquer formato de URL do Google Drive
     match = re.search(r'/d/([a-zA-Z0-9-_]+)', drive_url)
     if match:
         file_id = match.group(1)
-        # URL direta que funciona mesmo sem permissão de acesso
         converted_url = f'https://lh3.google.com/d/{file_id}=w1000'
         print(f"✅ URL Convertida: {file_id}")
         return converted_url
@@ -206,8 +204,8 @@ LOGIN_HTML = '''<!DOCTYPE html>
     <div class="w-full max-w-md">
         <div class="bg-gradient-to-b from-slate-800 to-black rounded-2xl shadow-2xl overflow-hidden border-2 border-red-600">
             <div class="bg-gradient-to-r from-blue-700 via-blue-900 to-black p-8 text-center border-b-2 border-red-600">
-                <div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600">
-                    <img src="{{ logo_url }}" alt="Logo" class="w-28 h-28 object-contain">
+                <div class="w-32 h-32 bg-black rounded-xl flex items-center justify-center mx-auto mb-4 shadow-2xl border-2 border-red-600 overflow-hidden">
+                    <img src="{{ logo_url }}" alt="Logo JG MINIS" class="w-full h-full object-contain p-2">
                 </div>
                 <h2 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">JG MINIS</h2>
                 <p class="text-blue-300 font-semibold">Portal de Miniaturas Premium</p>
@@ -287,8 +285,8 @@ HOME_HTML = '''<!DOCTYPE html>
     <nav class="bg-gradient-to-r from-blue-900 via-slate-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50">
         <div class="container mx-auto px-4 py-4 flex justify-between items-center">
             <a href="/" class="flex items-center gap-3 hover:opacity-80 transition">
-                <div class="w-14 h-14 bg-gradient-to-br from-blue-600 to-red-600 rounded-xl flex items-center justify-center shadow-lg border-2 border-blue-400">
-                    <img src="{{ logo_url }}" alt="Logo" class="w-12 h-12 object-contain">
+                <div class="w-14 h-14 bg-gradient-to-br from-blue-600 to-red-600 rounded-xl flex items-center justify-center shadow-lg border-2 border-blue-400 overflow-hidden">
+                    <img src="{{ logo_url }}" alt="Logo JG MINIS" class="w-12 h-12 object-contain">
                 </div>
                 <div>
                     <span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span>
