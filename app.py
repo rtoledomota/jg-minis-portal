@@ -1,23 +1,23 @@
-import sqlite3
-import json
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash
-from functools import wraps
 import os
-import bcrypt
+import sqlite3
+import jwt
+from datetime import datetime, timedelta
+from functools import wraps
+from flask import Flask, request, jsonify, redirect, url_for, render_template_string, flash, get_flashed_messages
+import bcrypt # For password hashing
 import re
-from datetime import datetime
+import json
 
 app = Flask(__name__)
-# Use environment variables for sensitive data
-app.secret_key = os.environ.get('SECRET_KEY', 'sua_chave_secreta_aqui_muito_segura_e_unica_12345')
-DB_FILE = 'database.db'
-WHATSAPP_NUMERO = os.environ.get('WHATSAPP_NUMERO', '5511999999999') # Número de WhatsApp para contato
+app.secret_key = os.environ.get('SECRET_KEY', 'sua_chave_secreta_aqui_muito_segura_e_longa') # Use a strong, unique key
 
-# --- Funções de Banco de Dados ---
+DB_FILE = 'database.db'
+WHATSAPP_NUMERO = os.environ.get('WHATSAPP_NUMERO', '5511999999999') # WhatsApp number for contact
+
+# --- Database Functions ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,7 +28,6 @@ def init_db():
             is_admin INTEGER DEFAULT 0
         )
     ''')
-    
     c.execute('''
         CREATE TABLE IF NOT EXISTS miniaturas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +40,6 @@ def init_db():
             max_reservations_per_user INTEGER DEFAULT 1
         )
     ''')
-    
     c.execute('''
         CREATE TABLE IF NOT EXISTS reservations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +52,6 @@ def init_db():
             FOREIGN KEY (miniatura_id) REFERENCES miniaturas(id)
         )
     ''')
-    
     c.execute('''
         CREATE TABLE IF NOT EXISTS waitlist (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,7 +72,7 @@ def load_initial_data():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
-    # Adicionar um usuário admin se não existir
+    # Add an admin user if not exists
     c.execute("SELECT * FROM users WHERE email = 'admin@jgminis.com.br'")
     if not c.fetchone():
         hashed_password = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -83,7 +80,7 @@ def load_initial_data():
                   ('Admin', 'admin@jgminis.com.br', '5511999999999', hashed_password, 1))
         print("OK Usuário admin adicionado.")
 
-    # Carregar miniaturas de exemplo se não houver nenhuma
+    # Load sample miniaturas if table is empty
     c.execute("SELECT COUNT(*) FROM miniaturas")
     if c.fetchone()[0] == 0:
         miniaturas_data = [
@@ -94,57 +91,89 @@ def load_initial_data():
             ("https://i.imgur.com/6Y6Y6Y6.jpeg", "Nissan LB Works HAKOSUKA Baby Blue", "2025-05-25", 12, 120.00, "Cor exclusiva", 1),
             ("https://i.imgur.com/7Z7Z7Z7.jpeg", "Ford Mustang Dark Horse #24 Ford Performance Racing School", "2025-06-18", 12, 130.00, "Edição de corrida", 1),
         ]
-
         print("Carregando dados iniciais de miniaturas...")
         for data in miniaturas_data:
             c.execute("INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) VALUES (?, ?, ?, ?, ?, ?, ?)", data)
             print(f"  OK {data[1]} - R$ {data[5]:.2f} ({data[4]} em estoque)")
-        print(f"OK Total carregado: {len(miniaturas_data)} miniaturas")
-    else:
-        print("Miniaturas já existem no BD, pulando carga inicial.")
-    conn.commit()
+        conn.commit()
     conn.close()
+    print(f"OK Total carregado: {len(miniaturas_data)} miniaturas")
 
-# --- Decoradores ---
+# --- JWT Functions ---
+def get_token(user_id, is_admin):
+    payload = {
+        'user_id': user_id,
+        'is_admin': is_admin,
+        'exp': datetime.utcnow() + timedelta(hours=24) # Token expires in 24 hours
+    }
+    return jwt.encode(payload, app.secret_key, algorithm='HS256')
+
+def verify_token(token):
+    try:
+        return jwt.decode(token, app.secret_key, algorithms=['HS256'])
+    except jwt.ExpiredSignatureError:
+        flash('Sessão expirada. Faça login novamente.', 'error')
+        return None
+    except jwt.InvalidTokenError:
+        flash('Token inválido. Faça login novamente.', 'error')
+        return None
+
+# --- Decorators ---
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            flash('Por favor, faça login para acessar esta página.', 'error')
+        token = request.cookies.get('token')
+        if not token:
+            flash('Você precisa estar logado para acessar esta página.', 'error')
             return redirect(url_for('login'))
         
+        user_data = verify_token(token)
+        if not user_data:
+            return redirect(url_for('login')) # Redirects if token is invalid or expired
+        
+        # Attach user data to request object
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('SELECT id, name, email, phone, is_admin FROM users WHERE id = ?', (session['user_id'],))
-        user = c.fetchone()
+        c.execute('SELECT id, name, email, phone, is_admin FROM users WHERE id = ?', (user_data['user_id'],))
+        user_db_data = c.fetchone()
         conn.close()
-        
-        if user:
-            request.user = {
-                'user_id': user[0],
-                'name': user[1],
-                'email': user[2],
-                'phone': user[3],
-                'is_admin': bool(user[4])
-            }
-        else:
-            session.pop('user_id', None)
-            flash('Sua sessão expirou ou o usuário não existe mais.', 'error')
+
+        if not user_db_data:
+            flash('Usuário não encontrado.', 'error')
             return redirect(url_for('login'))
-        
+
+        request.user = {
+            'user_id': user_db_data[0],
+            'name': user_db_data[1],
+            'email': user_db_data[2],
+            'phone': user_db_data[3],
+            'is_admin': bool(user_db_data[4])
+        }
         return f(*args, **kwargs)
     return decorated_function
 
 def admin_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # login_required already attaches request.user
         if not request.user.get('is_admin'):
             flash('Acesso negado: Você não tem permissões de administrador.', 'error')
             return redirect(url_for('index'))
         return f(*args, **kwargs)
     return decorated_function
 
-# --- Rotas de Autenticação ---
+# --- Helper Functions ---
+def format_phone(phone):
+    phone = re.sub(r'\D', '', phone)
+    if len(phone) == 11:
+        return f"({phone[:2]}) {phone[2:7]}-{phone[7:]}"
+    return phone
+
+def validate_phone(phone):
+    phone = re.sub(r'\D', '', phone)
+    return len(phone) == 11
+
+# --- Authentication Routes ---
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -152,16 +181,19 @@ def register():
         email = request.form['email']
         phone = request.form['phone']
         password = request.form['password']
-        confirm_password = request.form['confirm_password']
+        confirm = request.form['confirm_password']
 
         if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
             flash('Formato de e-mail inválido.', 'error')
             return redirect(url_for('register'))
-        if password != confirm_password:
+        if password != confirm:
             flash('As senhas não coincidem.', 'error')
             return redirect(url_for('register'))
         if len(password) < 6:
             flash('A senha deve ter pelo menos 6 caracteres.', 'error')
+            return redirect(url_for('register'))
+        if not validate_phone(phone):
+            flash('Telefone inválido. Use o formato (XX) XXXXX-XXXX.', 'error')
             return redirect(url_for('register'))
 
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -170,7 +202,7 @@ def register():
         c = conn.cursor()
         try:
             c.execute("INSERT INTO users (name, email, phone, password) VALUES (?, ?, ?, ?)",
-                      (name, email, phone, hashed_password))
+                      (name, email, format_phone(phone), hashed_password))
             conn.commit()
             flash('Registro bem-sucedido! Faça login.', 'success')
             return redirect(url_for('login'))
@@ -179,6 +211,7 @@ def register():
         finally:
             conn.close()
     
+    # GET request for register page
     template = '''
         <!DOCTYPE html>
         <html>
@@ -211,7 +244,7 @@ def register():
                     </div>
                     <div>
                         <label for="phone" class="block text-slate-300 font-bold mb-1">Telefone:</label>
-                        <input type="text" id="phone" name="phone" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="text" id="phone" name="phone" placeholder="(11) 99999-9999" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div>
                         <label for="password" class="block text-slate-300 font-bold mb-1">Senha:</label>
@@ -238,17 +271,23 @@ def login():
 
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('SELECT id, password FROM users WHERE email = ?', (email,))
+        c.execute('SELECT id, password, is_admin FROM users WHERE email = ?', (email,))
         user_data = c.fetchone()
         conn.close()
 
         if user_data and bcrypt.checkpw(password.encode('utf-8'), user_data[1].encode('utf-8')):
-            session['user_id'] = user_data[0]
+            user_id = user_data[0]
+            is_admin = bool(user_data[2])
+            token = get_token(user_id, is_admin)
+            
+            response = redirect(url_for('index'))
+            response.set_cookie('token', token, httponly=True, max_age=86400) # 24 hours
             flash('Login bem-sucedido!', 'success')
-            return redirect(url_for('index'))
+            return response
         else:
             flash('E-mail ou senha inválidos.', 'error')
     
+    # GET request for login page
     template = '''
         <!DOCTYPE html>
         <html>
@@ -289,13 +328,13 @@ def login():
     return render_template_string(template)
 
 @app.route('/logout')
-@login_required
 def logout():
-    session.pop('user_id', None)
+    response = redirect(url_for('login'))
+    response.delete_cookie('token')
     flash('Você foi desconectado.', 'info')
-    return redirect(url_for('login'))
+    return response
 
-# --- Rotas Principais ---
+# --- Main Routes ---
 @app.route('/')
 @login_required
 def index():
@@ -313,56 +352,49 @@ def index():
     items_html = ""
     for m in miniaturas:
         is_esgotado = m[4] <= 0
-        status = "ESGOTADO" if is_esgotado else "Em Estoque: {stock}".format(stock=m[4])
+        status = "ESGOTADO" if is_esgotado else f"Em Estoque: {m[4]}"
         status_color = "red" if is_esgotado else "green"
         
-        nome_json = json.dumps(m[2]) # Safely escape name for JS
+        nome_json = json.dumps(m[2]) # Ensure string is properly quoted for JS
         
         button_html = ""
         if is_esgotado:
-            whatsapp_link = "https://wa.me/{whatsapp_numero}?text=Olá%20JG%20MINIS,%20gostaria%20de%20informações%20sobre%20a%20miniatura:%20{miniatura_nome}".format(
-                whatsapp_numero=WHATSAPP_NUMERO, miniatura_nome=m[2]
-            )
-            button_html = '<a href="{whatsapp_link}" target="_blank" class="bg-orange-600 hover:bg-orange-700 text-white font-bold px-4 py-2 rounded-lg">Entrar em Contato</a>'.format(whatsapp_link=whatsapp_link)
+            whatsapp_link = f"https://wa.me/{WHATSAPP_NUMERO}?text=Olá%20JG%20MINIS,%20gostaria%20de%20informações%20sobre%20a%20miniatura:%20{m[2]}"
+            button_html = f'<a href="{whatsapp_link}" target="_blank" class="bg-orange-600 hover:bg-orange-700 text-white font-bold px-4 py-2 rounded-lg">Entrar em Contato</a>'
         else:
-            button_html = '<button onclick="abrirConfirmacao({id}, {nome_json}, {preco}, {stock}, {max_res})" class="bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold px-4 py-2 rounded-lg">Reservar</button>'.format(
-                id=m[0], nome_json=nome_json, preco=m[5], stock=m[4], max_res=m[7]
-            )
+            button_html = f'<button onclick="abrirConfirmacao({m[0]}, {nome_json}, {m[5]}, {m[4]}, {m[7]})" class="bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold px-4 py-2 rounded-lg">Reservar</button>'
         
-        items_html += '''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 overflow-hidden">
+        items_html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 overflow-hidden">
 <div class="bg-black h-48 flex items-center justify-center relative overflow-hidden">
-<img src="{image_url}" class="w-full h-full object-cover" alt="{name}" onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'">
+<img src="{m[1]}" class="w-full h-full object-cover" alt="{m[2]}" onerror="this.style.background='linear-gradient(135deg, #1e40af 0%, #7c3aed 100%)'">
 <div class="absolute top-3 right-3 bg-{status_color}-600 text-white px-3 py-1 rounded-full text-sm font-bold">{status}</div>
 </div>
 <div class="p-4">
-<h3 class="font-bold text-blue-300 mb-2 text-lg">{name}</h3>
-<p class="text-sm text-slate-400 mb-2">Chegada: {arrival_date}</p>
-<p class="text-sm text-slate-400 mb-3">{observations}</p>
+<h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3>
+<p class="text-sm text-slate-400 mb-2">Chegada: {m[3]}</p>
+<p class="text-sm text-slate-400 mb-3">{m[6]}</p>
 <div class="flex justify-between items-center gap-2">
-<span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {price:.2f}</span>
+<span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
 {button_html}
 </div>
 </div>
-</div>'''.format(
-            image_url=m[1], name=m[2], arrival_date=m[3], status_color=status_color, status=status,
-            observations=m[6], price=m[5], button_html=button_html
-        )
+</div>'''
     
     admin_links = ''
     if request.user.get('is_admin'):
-        admin_links = '''
+        admin_links = f'''
             <a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a>
             <a href="/pessoas" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Pessoas</a>
             <a href="/lista-espera" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">Lista de Espera</a>
         '''
     
     template = '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Minhas Reservas</a>{admin_links}<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">Catalogo de Miniaturas</h1><p class="text-slate-300 mb-8">Pre vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">{items_html}</div></div><div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8"><h2 class="text-2xl font-black text-blue-400 mb-4">Confirmar Reserva</h2><div id="confirmContent" class="text-slate-300 mb-6 space-y-3"></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Quantidade:</label><div class="flex gap-2"><button type="button" onclick="decrementarQtd()" class="bg-red-600 text-white font-bold w-12 h-12 rounded-lg">-</button><input type="number" id="quantidadeInput" value="1" min="1" class="flex-1 bg-slate-700 text-white font-bold text-center rounded-lg border-2 border-blue-600"><button type="button" onclick="incrementarQtd()" class="bg-green-600 text-white font-bold w-12 h-12 rounded-lg">+</button></div></div><div class="flex gap-4"><button onclick="fecharModal()" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg">Cancelar</button><button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Confirmar</button></div></div></div><script>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Minhas Reservas</a>{admin_links_jinja}<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">Catalogo de Miniaturas</h1><p class="text-slate-300 mb-8">Pre vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">{items_html_jinja}</div></div><div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8"><h2 class="text-2xl font-black text-blue-400 mb-4">Confirmar Reserva</h2><div id="confirmContent" class="text-slate-300 mb-6 space-y-3"></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Quantidade:</label><div class="flex gap-2"><button type="button" onclick="decrementarQtd()" class="bg-red-600 text-white font-bold w-12 h-12 rounded-lg">-</button><input type="number" id="quantidadeInput" value="1" min="1" class="flex-1 bg-slate-700 text-white font-bold text-center rounded-lg border-2 border-blue-600"><button type="button" onclick="incrementarQtd()" class="bg-green-600 text-white font-bold w-12 h-12 rounded-lg">+</button></div></div><div class="flex gap-4"><button onclick="fecharModal()" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg">Cancelar</button><button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Confirmar</button></div></div></div><script>
 let reservaAtual = null;
 let maxQtd = 1;
-let userId = {user_id};
-let userEmail = "{user_email}";
-let userPhone = "{user_phone}";
+let userId = {user_id_jinja};
+let userEmail = "{user_email_jinja}";
+let userPhone = "{user_phone_jinja}";
 
 function abrirConfirmacao(id, nome, preco, stock, max) {{
   reservaAtual = id;
@@ -387,31 +419,30 @@ function incrementarQtd() {{
 function confirmarReserva() {{
   if (!reservaAtual) return;
   let qtd = parseInt(document.getElementById("quantidadeInput").value);
-  fetch("/reservar", {{{{
+  fetch("/reservar", {{
     method: "POST",
-    headers: {{{{ "Content-Type": "application/json" }}}},
-    body: JSON.stringify({{{{miniatura_id: reservaAtual, quantidade: qtd}}}})
-  }}}}).then(r => r.json()).then(data => {{{{
-    if (data.success) {{{{
+    headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{miniatura_id: reservaAtual, quantidade: qtd}})
+  }}).then(r => r.json()).then(data => {{
+    if (data.success) {{
       alert("OK Reserva realizada!");
       location.reload();
-    }}}} else {{{{
+    }} else {{
       alert("ERRO: " + data.error);
-    }}}}
-  }}}}).catch(e => {{{{
+    }}
+  }}).catch(e => {{
     alert("ERRO na requisicao");
-  }}}});
+  }});
   fecharModal();
 }}
 </script></body></html>'''
-
-    return render_template_string(template.format(
-        admin_links=admin_links,
-        items_html=items_html,
-        user_id=user_id,
-        user_email=user_email,
-        user_phone=user_phone
-    ))
+    
+    return render_template_string(template, 
+                                  items_html_jinja=items_html, 
+                                  admin_links_jinja=admin_links,
+                                  user_id_jinja=user_id,
+                                  user_email_jinja=user_email,
+                                  user_phone_jinja=user_phone)
 
 @app.route('/reservar', methods=['POST'])
 @login_required
@@ -437,16 +468,16 @@ def reservar():
         max_reservations_per_user = miniatura[1]
 
         if quantidade > current_stock:
-            return jsonify({'success': False, 'error': 'Quantidade solicitada ({quantidade}) excede o estoque disponível ({current_stock}).'.format(quantidade=quantidade, current_stock=current_stock)}), 400
+            return jsonify({'success': False, 'error': f'Quantidade solicitada ({quantidade}) excede o estoque disponível ({current_stock}).'}), 400
         
-        # Verificar reservas existentes do usuário para esta miniatura
+        # Check existing reservations for this user and miniatura
         c.execute('SELECT SUM(quantity) FROM reservations WHERE user_id = ? AND miniatura_id = ? AND status = "pending"', (user_id, miniatura_id))
         existing_reservations_sum = c.fetchone()[0] or 0
 
         if (existing_reservations_sum + quantidade) > max_reservations_per_user:
-            return jsonify({'success': False, 'error': 'Você já tem {existing_reservations_sum} reservas para esta miniatura. O máximo permitido é {max_reservations_per_user}.'.format(existing_reservations_sum=existing_reservations_sum, max_reservations_per_user=max_reservations_per_user)}), 400
+            return jsonify({'success': False, 'error': f'Você já tem {existing_reservations_sum} reservas para esta miniatura. O máximo permitido é {max_reservations_per_user}.'}), 400
 
-        # Realiza a reserva
+        # Make reservation
         c.execute('UPDATE miniaturas SET stock = stock - ? WHERE id = ?', (quantidade, miniatura_id))
         c.execute('INSERT INTO reservations (user_id, miniatura_id, quantity, reservation_date, status) VALUES (?, ?, ?, ?, ?)',
                   (user_id, miniatura_id, quantidade, datetime.now().isoformat(), 'pending'))
@@ -487,26 +518,22 @@ def minhas_reservas():
                 'cancelled': 'bg-red-600'
             }.get(r[5], 'bg-gray-600')
 
-            reservas_html += '''
+            reservas_html += f'''
                 <div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 overflow-hidden flex flex-col md:flex-row items-center p-4 gap-4">
-                    <img src="{image_url}" class="w-32 h-32 object-cover rounded-lg" alt="{name}">
+                    <img src="{r[2]}" class="w-32 h-32 object-cover rounded-lg" alt="{r[1]}">
                     <div class="flex-grow">
-                        <h3 class="font-bold text-blue-300 text-xl mb-1">{name}</h3>
-                        <p class="text-sm text-slate-400">Quantidade: {quantity}</p>
-                        <p class="text-sm text-slate-400">Preço Unitário: R$ {price:.2f}</p>
+                        <h3 class="font-bold text-blue-300 text-xl mb-1">{r[1]}</h3>
+                        <p class="text-sm text-slate-400">Quantidade: {r[3]}</p>
+                        <p class="text-sm text-slate-400">Preço Unitário: R$ {r[6]:.2f}</p>
                         <p class="text-sm text-slate-400">Total: R$ {total_price:.2f}</p>
-                        <p class="text-sm text-slate-400">Data da Reserva: {reservation_date}</p>
-                        <span class="{status_color} text-white px-3 py-1 rounded-full text-sm font-bold mt-2 inline-block">{status_text}</span>
+                        <p class="text-sm text-slate-400">Data da Reserva: {r[4].split('T')[0]}</p>
+                        <span class="{status_color} text-white px-3 py-1 rounded-full text-sm font-bold mt-2 inline-block">{r[5].capitalize()}</span>
                     </div>
                     <div class="flex flex-col gap-2">
-                        <button onclick="cancelarReserva({reserva_id})" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Cancelar</button>
+                        <button onclick="cancelarReserva({r[0]})" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Cancelar</button>
                     </div>
                 </div>
-            '''.format(
-                image_url=r[2], name=r[1], quantity=r[3], price=r[6], total_price=total_price,
-                reservation_date=r[4].split('T')[0], status_color=status_color, status_text=r[5].capitalize(),
-                reserva_id=r[0]
-            )
+            '''
     
     template = '''
         <!DOCTYPE html>
@@ -531,33 +558,33 @@ def minhas_reservas():
             <div class="container mx-auto px-4 py-12">
                 <h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-8">Minhas Reservas</h1>
                 <div class="grid grid-cols-1 gap-6">
-                    {reservas_html}
+                    {reservas_html_jinja}
                 </div>
             </div>
             <script>
                 function cancelarReserva(reservaId) {{
                     if (confirm("Tem certeza que deseja cancelar esta reserva?")) {{
-                        fetch("/cancelar-reserva", {{{{
+                        fetch("/cancelar-reserva", {{
                             method: "POST",
-                            headers: {{{{ "Content-Type": "application/json" }}}},
-                            body: JSON.stringify({{{{reserva_id: reservaId}}}})
-                        }}}}).then(r => r.json()).then(data => {{{{
-                            if (data.success) {{{{
+                            headers: {{"Content-Type": "application/json"}},
+                            body: JSON.stringify({{reserva_id: reservaId}})
+                        }}).then(r => r.json()).then(data => {{
+                            if (data.success) {{
                                 alert("Reserva cancelada com sucesso!");
                                 location.reload();
-                            }}}} else {{{{
+                            }} else {{
                                 alert("ERRO: " + data.error);
-                            }}}}
-                        }}}}).catch(e => {{{{
+                            }}
+                        }}).catch(e => {{
                             alert("ERRO na requisição: " + e);
-                        }}}});
-                    }}}}
+                        }});
+                    }}
                 }}
             </script>
         </body>
         </html>
     '''
-    return render_template_string(template.format(reservas_html=reservas_html))
+    return render_template_string(template, reservas_html_jinja=reservas_html)
 
 @app.route('/cancelar-reserva', methods=['POST'])
 @login_required
@@ -597,7 +624,7 @@ def cancelar_reserva():
     finally:
         conn.close()
 
-# --- Rotas de Admin ---
+# --- Admin Routes ---
 @app.route('/admin')
 @login_required
 @admin_required
@@ -610,18 +637,18 @@ def admin_panel():
 
     miniaturas_html = ""
     for m in miniaturas:
-        miniaturas_html += '''
+        miniaturas_html += f'''
             <tr class="border-b border-slate-700 hover:bg-slate-700">
-                <td class="px-4 py-3">{id}</td>
-                <td class="px-4 py-3">{name}</td>
-                <td class="px-4 py-3">{stock}</td>
-                <td class="px-4 py-3">R$ {price:.2f}</td>
+                <td class="px-4 py-3">{m[0]}</td>
+                <td class="px-4 py-3">{m[1]}</td>
+                <td class="px-4 py-3">{m[2]}</td>
+                <td class="px-4 py-3">R$ {m[3]:.2f}</td>
                 <td class="px-4 py-3 flex gap-2">
-                    <a href="/admin/edit-miniatura/{id}" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg text-sm">Editar</a>
-                    <button onclick="deleteMiniatura({id})" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg text-sm">Excluir</button>
+                    <a href="/admin/edit-miniatura/{m[0]}" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg text-sm">Editar</a>
+                    <button onclick="deleteMiniatura({m[0]})" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg text-sm">Excluir</button>
                 </td>
             </tr>
-        '''.format(id=m[0], name=m[1], stock=m[2], price=m[3])
+        '''
 
     template = '''
         <!DOCTYPE html>
@@ -663,7 +690,7 @@ def admin_panel():
                             </tr>
                         </thead>
                         <tbody>
-                            {miniaturas_html}
+                            {miniaturas_html_jinja}
                         </tbody>
                     </table>
                 </div>
@@ -671,26 +698,26 @@ def admin_panel():
             <script>
                 function deleteMiniatura(id) {{
                     if (confirm("Tem certeza que deseja excluir esta miniatura?")) {{
-                        fetch("/admin/delete-miniatura/{id_placeholder}".replace("{id_placeholder}", id), {{{{
+                        fetch(`/admin/delete-miniatura/${{id}}`, {{
                             method: "POST",
-                            headers: {{{{ "Content-Type": "application/json" }}}}
-                        }}}}).then(r => r.json()).then(data => {{{{
-                            if (data.success) {{{{
+                            headers: {{"Content-Type": "application/json"}}
+                        }}).then(r => r.json()).then(data => {{
+                            if (data.success) {{
                                 alert("Miniatura excluída com sucesso!");
                                 location.reload();
-                            }}}} else {{{{
+                            }} else {{
                                 alert("ERRO: " + data.error);
-                            }}}}
-                        }}}}).catch(e => {{{{
+                            }}
+                        }}).catch(e => {{
                             alert("ERRO na requisição: " + e);
-                        }}}});
-                    }}}}
+                        }});
+                    }}
                 }}
             </script>
         </body>
         </html>
     '''
-    return render_template_string(template.format(miniaturas_html=miniaturas_html))
+    return render_template_string(template, miniaturas_html_jinja=miniaturas_html)
 
 @app.route('/admin/add-miniatura', methods=['GET', 'POST'])
 @login_required
@@ -714,7 +741,7 @@ def add_miniatura():
             flash('Miniatura adicionada com sucesso!', 'success')
             return redirect(url_for('admin_panel'))
         except Exception as e:
-            flash('Erro ao adicionar miniatura: {error}'.format(error=e), 'error')
+            flash(f'Erro ao adicionar miniatura: {e}', 'error')
         finally:
             conn.close()
     
@@ -802,7 +829,7 @@ def edit_miniatura(miniatura_id):
             flash('Miniatura atualizada com sucesso!', 'success')
             return redirect(url_for('admin_panel'))
         except Exception as e:
-            flash('Erro ao atualizar miniatura: {error}'.format(error=e), 'error')
+            flash(f'Erro ao atualizar miniatura: {e}', 'error')
         finally:
             conn.close()
     
@@ -836,34 +863,34 @@ def edit_miniatura(miniatura_id):
                         </ul>
                     {% endif %}
                 {% endwith %}
-                <form method="POST" action="/admin/edit-miniatura/{miniatura_id}" class="space-y-4">
+                <form method="POST" action="/admin/edit-miniatura/{miniatura_id_jinja}" class="space-y-4">
                     <div>
                         <label for="name" class="block text-slate-300 font-bold mb-1">Nome:</label>
-                        <input type="text" id="name" name="name" value="{name}" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="text" id="name" name="name" value="{miniatura_name_jinja}" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div>
                         <label for="image_url" class="block text-slate-300 font-bold mb-1">URL da Imagem:</label>
-                        <input type="url" id="image_url" name="image_url" value="{image_url}" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="url" id="image_url" name="image_url" value="{miniatura_image_url_jinja}" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div>
                         <label for="arrival_date" class="block text-slate-300 font-bold mb-1">Previsão de Chegada:</label>
-                        <input type="date" id="arrival_date" name="arrival_date" value="{arrival_date}" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="date" id="arrival_date" name="arrival_date" value="{miniatura_arrival_date_jinja}" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div>
                         <label for="stock" class="block text-slate-300 font-bold mb-1">Estoque:</label>
-                        <input type="number" id="stock" name="stock" value="{stock}" required min="0" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="number" id="stock" name="stock" value="{miniatura_stock_jinja}" required min="0" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div>
                         <label for="price" class="block text-slate-300 font-bold mb-1">Preço:</label>
-                        <input type="number" id="price" name="price" value="{price:.2f}" required step="0.01" min="0" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="number" id="price" name="price" value="{miniatura_price_jinja:.2f}" required step="0.01" min="0" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div>
                         <label for="observations" class="block text-slate-300 font-bold mb-1">Observações:</label>
-                        <textarea id="observations" name="observations" rows="3" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">{observations}</textarea>
+                        <textarea id="observations" name="observations" rows="3" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">{miniatura_observations_jinja}</textarea>
                     </div>
                     <div>
                         <label for="max_reservations_per_user" class="block text-slate-300 font-bold mb-1">Máx. Reservas por Usuário:</label>
-                        <input type="number" id="max_reservations_per_user" name="max_reservations_per_user" value="{max_reservations_per_user}" required min="1" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="number" id="max_reservations_per_user" name="max_reservations_per_user" value="{miniatura_max_reservations_per_user_jinja}" required min="1" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div class="flex gap-4">
                         <a href="/admin" class="flex-1 text-center bg-slate-700 text-white font-bold py-2 rounded-lg hover:bg-slate-600 transition duration-300">Cancelar</a>
@@ -874,16 +901,15 @@ def edit_miniatura(miniatura_id):
         </body>
         </html>
     '''
-    return render_template_string(template.format(
-        miniatura_id=miniatura_id,
-        image_url=miniatura[0],
-        name=miniatura[1],
-        arrival_date=miniatura[2],
-        stock=miniatura[3],
-        price=miniatura[4],
-        observations=miniatura[5],
-        max_reservations_per_user=miniatura[6]
-    ))
+    return render_template_string(template,
+                                  miniatura_id_jinja=miniatura_id,
+                                  miniatura_image_url_jinja=miniatura[0],
+                                  miniatura_name_jinja=miniatura[1],
+                                  miniatura_arrival_date_jinja=miniatura[2],
+                                  miniatura_stock_jinja=miniatura[3],
+                                  miniatura_price_jinja=miniatura[4],
+                                  miniatura_observations_jinja=miniatura[5],
+                                  miniatura_max_reservations_per_user_jinja=miniatura[6])
 
 @app.route('/admin/delete-miniatura/<int:miniatura_id>', methods=['POST'])
 @login_required
@@ -917,19 +943,19 @@ def pessoas():
     users_html = ""
     for u in users:
         admin_status = "Sim" if u[4] else "Não"
-        users_html += '''
+        users_html += f'''
             <tr class="border-b border-slate-700 hover:bg-slate-700">
-                <td class="px-4 py-3">{id}</td>
-                <td class="px-4 py-3">{name}</td>
-                <td class="px-4 py-3">{email}</td>
-                <td class="px-4 py-3">{phone}</td>
+                <td class="px-4 py-3">{u[0]}</td>
+                <td class="px-4 py-3">{u[1]}</td>
+                <td class="px-4 py-3">{u[2]}</td>
+                <td class="px-4 py-3">{u[3]}</td>
                 <td class="px-4 py-3">{admin_status}</td>
                 <td class="px-4 py-3 flex gap-2">
-                    <a href="/admin/edit-user/{id}" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg text-sm">Editar</a>
-                    <button onclick="deleteUser({id})" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg text-sm">Excluir</button>
+                    <a href="/admin/edit-user/{u[0]}" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg text-sm">Editar</a>
+                    <button onclick="deleteUser({u[0]})" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg text-sm">Excluir</button>
                 </td>
             </tr>
-        '''.format(id=u[0], name=u[1], email=u[2], phone=u[3], admin_status=admin_status)
+        '''
 
     template = '''
         <!DOCTYPE html>
@@ -968,34 +994,34 @@ def pessoas():
                             </tr>
                         </thead>
                         <tbody>
-                            {users_html}
+                            {users_html_jinja}
                         </tbody>
                     </table>
                 </div>
             </div>
             <script>
                 function deleteUser(id) {{
-                    if (confirm("Tem certeza que deseja excluir este usuário? Todas as reservas e entradas na lista de espera associadas também serão removidas.")) {{
-                        fetch("/admin/delete-user/{id_placeholder}".replace("{id_placeholder}", id), {{{{
+                    if (confirm("Tem certeza que deseja excluir este usuário?")) {{
+                        fetch(`/admin/delete-user/${{id}}`, {{
                             method: "POST",
-                            headers: {{{{ "Content-Type": "application/json" }}}}
-                        }}}}).then(r => r.json()).then(data => {{{{
-                            if (data.success) {{{{
+                            headers: {{"Content-Type": "application/json"}}
+                        }}).then(r => r.json()).then(data => {{
+                            if (data.success) {{
                                 alert("Usuário excluído com sucesso!");
                                 location.reload();
-                            }}}} else {{{{
+                            }} else {{
                                 alert("ERRO: " + data.error);
-                            }}}}
-                        }}}}).catch(e => {{{{
+                            }}
+                        }}).catch(e => {{
                             alert("ERRO na requisição: " + e);
-                        }}}});
-                    }}}}
+                        }});
+                    }}
                 }}
             </script>
         </body>
         </html>
     '''
-    return render_template_string(template.format(users_html=users_html))
+    return render_template_string(template, users_html_jinja=users_html)
 
 @app.route('/admin/edit-user/<int:user_id>', methods=['GET', 'POST'])
 @login_required
@@ -1012,12 +1038,12 @@ def edit_user(user_id):
 
         try:
             c.execute("UPDATE users SET name=?, email=?, phone=?, is_admin=? WHERE id=?",
-                      (name, email, phone, is_admin, user_id))
+                      (name, email, format_phone(phone), is_admin, user_id))
             conn.commit()
             flash('Usuário atualizado com sucesso!', 'success')
             return redirect(url_for('pessoas'))
         except Exception as e:
-            flash('Erro ao atualizar usuário: {error}'.format(error=e), 'error')
+            flash(f'Erro ao atualizar usuário: {e}', 'error')
         finally:
             conn.close()
     
@@ -1053,21 +1079,21 @@ def edit_user(user_id):
                         </ul>
                     {% endif %}
                 {% endwith %}
-                <form method="POST" action="/admin/edit-user/{user_id}" class="space-y-4">
+                <form method="POST" action="/admin/edit-user/{user_id_jinja}" class="space-y-4">
                     <div>
                         <label for="name" class="block text-slate-300 font-bold mb-1">Nome:</label>
-                        <input type="text" id="name" name="name" value="{name}" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="text" id="name" name="name" value="{user_name_jinja}" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div>
                         <label for="email" class="block text-slate-300 font-bold mb-1">E-mail:</label>
-                        <input type="email" id="email" name="email" value="{email}" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="email" id="email" name="email" value="{user_email_jinja}" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div>
                         <label for="phone" class="block text-slate-300 font-bold mb-1">Telefone:</label>
-                        <input type="text" id="phone" name="phone" value="{phone}" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
+                        <input type="text" id="phone" name="phone" value="{user_phone_jinja}" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500">
                     </div>
                     <div class="flex items-center">
-                        <input type="checkbox" id="is_admin" name="is_admin" {is_admin_checked} class="h-5 w-5 text-blue-600 rounded border-gray-300 focus:ring-blue-500">
+                        <input type="checkbox" id="is_admin" name="is_admin" {is_admin_checked_jinja} class="h-5 w-5 text-blue-600 rounded border-gray-300 focus:ring-blue-500">
                         <label for="is_admin" class="ml-2 block text-slate-300 font-bold">É Administrador</label>
                     </div>
                     <div class="flex gap-4">
@@ -1079,32 +1105,28 @@ def edit_user(user_id):
         </body>
         </html>
     '''
-    return render_template_string(template.format(
-        user_id=user_id,
-        name=user[0],
-        email=user[1],
-        phone=user[2],
-        is_admin_checked=is_admin_checked
-    ))
+    return render_template_string(template,
+                                  user_id_jinja=user_id,
+                                  user_name_jinja=user[0],
+                                  user_email_jinja=user[1],
+                                  user_phone_jinja=user[2],
+                                  is_admin_checked_jinja=is_admin_checked)
 
 @app.route('/admin/delete-user/<int:user_id>', methods=['POST'])
 @login_required
 @admin_required
 def delete_user(user_id):
-    # Não deleta o próprio admin logado
+    # Cannot delete self
     if request.user.get('user_id') == user_id:
-        return jsonify({'success': False, 'error': 'Não pode deletar sua própria conta'}), 400
+        return jsonify({'success': False, 'error': 'Você não pode deletar sua própria conta.'}), 400
     
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
-        # Deleta as reservas da pessoa primeiro
+        # Delete related reservations and waitlist entries first
         c.execute('DELETE FROM reservations WHERE user_id = ?', (user_id,))
-        # Deleta da lista de espera
         c.execute('DELETE FROM waitlist WHERE user_id = ?', (user_id,))
-        # Depois deleta a pessoa
         c.execute('DELETE FROM users WHERE id = ?', (user_id,))
-        
         conn.commit()
         return jsonify({'success': True, 'message': 'Usuário excluído com sucesso!'})
     except Exception as e:
@@ -1134,23 +1156,20 @@ def lista_espera():
     for entry in waitlist_entries:
         notification_status = "Enviada" if entry[5] else "Pendente"
         status_color = "green" if entry[5] else "yellow"
-        waitlist_html += '''
+        waitlist_html += f'''
             <tr class="border-b border-slate-700 hover:bg-slate-700">
-                <td class="px-4 py-3">{id}</td>
-                <td class="px-4 py-3">{user_name}</td>
-                <td class="px-4 py-3">{user_email}</td>
-                <td class="px-4 py-3">{miniatura_name}</td>
-                <td class="px-4 py-3">{request_date}</td>
+                <td class="px-4 py-3">{entry[0]}</td>
+                <td class="px-4 py-3">{entry[1]}</td>
+                <td class="px-4 py-3">{entry[2]}</td>
+                <td class="px-4 py-3">{entry[3]}</td>
+                <td class="px-4 py-3">{entry[4].split('T')[0]}</td>
                 <td class="px-4 py-3"><span class="bg-{status_color}-600 text-white px-3 py-1 rounded-full text-sm">{notification_status}</span></td>
                 <td class="px-4 py-3 flex gap-2">
-                    <button onclick="markNotified({id})" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg text-sm">Marcar Notificado</button>
-                    <button onclick="deleteWaitlistEntry({id})" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg text-sm">Excluir</button>
+                    <button onclick="markNotified({entry[0]})" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded-lg text-sm">Marcar Notificado</button>
+                    <button onclick="deleteWaitlistEntry({entry[0]})" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-lg text-sm">Excluir</button>
                 </td>
             </tr>
-        '''.format(
-            id=entry[0], user_name=entry[1], user_email=entry[2], miniatura_name=entry[3],
-            request_date=entry[4].split('T')[0], status_color=status_color, notification_status=notification_status
-        )
+        '''
 
     template = '''
         <!DOCTYPE html>
@@ -1190,7 +1209,7 @@ def lista_espera():
                             </tr>
                         </thead>
                         <tbody>
-                            {waitlist_html}
+                            {waitlist_html_jinja}
                         </tbody>
                     </table>
                 </div>
@@ -1198,44 +1217,44 @@ def lista_espera():
             <script>
                 function markNotified(id) {{
                     if (confirm("Marcar este item como 'notificação enviada'?")) {{
-                        fetch("/admin/mark-notified/{id_placeholder}".replace("{id_placeholder}", id), {{{{
+                        fetch(`/admin/mark-notified/${{id}}`, {{
                             method: "POST",
-                            headers: {{{{ "Content-Type": "application/json" }}}}
-                        }}}}).then(r => r.json()).then(data => {{{{
-                            if (data.success) {{{{
+                            headers: {{"Content-Type": "application/json"}}
+                        }}).then(r => r.json()).then(data => {{
+                            if (data.success) {{
                                 alert("Status atualizado!");
                                 location.reload();
-                            }}}} else {{{{
+                            }} else {{
                                 alert("ERRO: " + data.error);
-                            }}}}
-                        }}}}).catch(e => {{{{
+                            }}
+                        }}).catch(e => {{
                             alert("ERRO na requisição: " + e);
-                        }}}});
-                    }}}}
+                        }});
+                    }}
                 }}
 
                 function deleteWaitlistEntry(id) {{
                     if (confirm("Tem certeza que deseja excluir este item da lista de espera?")) {{
-                        fetch("/admin/delete-waitlist/{id_placeholder}".replace("{id_placeholder}", id), {{{{
+                        fetch(`/admin/delete-waitlist/${{id}}`, {{
                             method: "POST",
-                            headers: {{{{ "Content-Type": "application/json" }}}}
-                        }}}}).then(r => r.json()).then(data => {{{{
-                            if (data.success) {{{{
+                            headers: {{"Content-Type": "application/json"}}
+                        }}).then(r => r.json()).then(data => {{
+                            if (data.success) {{
                                 alert("Item excluído com sucesso!");
                                 location.reload();
-                            }}}} else {{{{
+                            }} else {{
                                 alert("ERRO: " + data.error);
-                            }}}}
-                        }}}}).catch(e => {{{{
+                            }}
+                        }}).catch(e => {{
                             alert("ERRO na requisição: " + e);
-                        }}}});
-                    }}}}
+                        }});
+                    }}
                 }}
             </script>
         </body>
         </html>
     '''
-    return render_template_string(template.format(waitlist_html=waitlist_html))
+    return render_template_string(template, waitlist_html_jinja=waitlist_html)
 
 @app.route('/admin/mark-notified/<int:entry_id>', methods=['POST'])
 @login_required
@@ -1297,9 +1316,10 @@ def add_to_waitlist():
     finally:
         conn.close()
 
-# --- Inicialização ---
+# --- Initialization ---
+init_db()
+load_initial_data()
+
 if __name__ == '__main__':
-    init_db()
-    load_initial_data()
-    port = int(os.environ.get('PORT', 8080)) # Railway uses PORT env var
-    app.run(host='0.0.0.0', port=port, debug=False) # debug=False for production
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=True)
