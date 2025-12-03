@@ -631,7 +631,6 @@ def cancelar_reserva():
     finally:
         conn.close()
 
-# --- Rotas de Admin ---
 @app.route('/admin')
 @login_required
 @admin_required
@@ -1498,7 +1497,6 @@ def add_to_waitlist():
     finally:
         conn.close()
 
-# --- Inicialização ---
 init_db()
 load_initial_data()
 load_miniaturas_from_sheets()
