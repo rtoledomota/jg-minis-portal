@@ -322,7 +322,7 @@ def reservar():
         
         c.execute('UPDATE miniaturas SET stock = stock - ? WHERE id = ?', (quantidade, miniatura_id))
         c.execute('INSERT INTO reservations (user_id, miniatura_id, quantity, reservation_date, status) VALUES (?, ?, ?, ?, ?)', 
-                  (user_id, miniatura_id, quantidade, datetime.now().isoformat(), 'pending'))
+                  (user_id, miniatura_id, quantidade, datetime.now().isoformat(), 'confirmed'))
         conn.commit()
         return {'success': True, 'message': 'Reserva realizada com sucesso!'}
     except Exception as e:
@@ -769,7 +769,7 @@ def change_password(user_id):
     conn.close()
     return {'success': True}
 
-@app.route('/delete-user/<int:user_id>', methods=['POST'])
+@app.route('/admin/delete-user/<int:user_id>', methods=['POST'])
 @login_required
 @admin_required
 def delete_user(user_id):
@@ -819,7 +819,7 @@ def relatorio_reservas():
     c.execute('SELECT DISTINCT name FROM users WHERE is_admin = 0 ORDER BY name')
     usuarios = [row[0] for row in c.fetchall()]
     
-    query = '''SELECT r.id, u.name, m.name, r.quantity, m.price, r.reservation_date, r.status
+    query = '''SELECT r.id, u.name, m.name, r.quantity, m.price, r.reservation_date, r.status, r.miniatura_id, r.user_id
                FROM reservations r
                JOIN users u ON r.user_id = u.id
                JOIN miniaturas m ON r.miniatura_id = m.id
@@ -845,21 +845,129 @@ def relatorio_reservas():
     total_valor = 0
     
     if not reservas:
-        reservas_html = '<tr><td colspan="7" class="px-4 py-3 text-center text-slate-400">Nenhuma reserva encontrada</td></tr>'
+        reservas_html = '<tr><td colspan="9" class="px-4 py-3 text-center text-slate-400">Nenhuma reserva encontrada</td></tr>'
     else:
         for r in reservas:
             total = r[3] * r[4]
             total_valor += total
             status_color = {'pending': 'yellow', 'confirmed': 'green', 'cancelled': 'red'}.get(r[6], 'gray')
-            reservas_html += f'<tr class="border-b"><td class="px-4 py-2">{r[0]}</td><td class="px-4 py-2">{r[1]}</td><td class="px-4 py-2">{r[2]}</td><td class="px-4 py-2">{r[3]}</td><td class="px-4 py-2">R$ {r[4]:.2f}</td><td class="px-4 py-2">R$ {total:.2f}</td><td class="px-4 py-2"><span class="bg-{status_color}-600 text-white px-2 py-1 rounded text-sm">{r[6]}</span></td></tr>'
+            reservas_html += f'<tr class="border-b"><td class="px-4 py-2">{r[0]}</td><td class="px-4 py-2">{r[1]}</td><td class="px-4 py-2">{r[2]}</td><td class="px-4 py-2">{r[3]}</td><td class="px-4 py-2">R$ {r[4]:.2f}</td><td class="px-4 py-2">R$ {total:.2f}</td><td class="px-4 py-2"><span class="bg-{status_color}-600 text-white px-2 py-1 rounded text-sm">{r[6]}</span></td><td class="px-4 py-2"><button onclick="editarReserva({r[0]}, {r[3]}, \'{r[6]}\')" class="bg-blue-600 text-white px-3 py-1 rounded text-sm">Editar</button></td><td class="px-4 py-2"><button onclick="cancelarReservaAdmin({r[0]}, {r[7]}, {r[3]})" class="bg-red-600 text-white px-3 py-1 rounded text-sm">Cancelar</button></td></tr>'
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Relatório - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen"><nav class="bg-blue-900 p-4 flex justify-between"><a href="/admin" class="text-white font-bold">← Admin</a><span class="text-white font-bold">Relatório de Reservas</span></nav><div class="p-8 max-w-7xl mx-auto"><div class="bg-slate-800 rounded-lg p-6 mb-6"><h2 class="text-2xl text-blue-400 font-bold mb-4">Filtros</h2><form method="GET" class="flex gap-4"><select name="miniatura" class="bg-slate-700 text-white px-4 py-2 rounded"><option value="">Todas as Miniaturas</option>{''.join([f'<option value="{m}">{m}</option>' for m in miniaturas])}</select><select name="usuario" class="bg-slate-700 text-white px-4 py-2 rounded"><option value="">Todos os Usuários</option>{''.join([f'<option value="{u}">{u}</option>' for u in usuarios])}</select><button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded font-bold">Filtrar</button><button type="button" onclick="exportarExcel()" class="bg-green-600 text-white px-4 py-2 rounded font-bold">📊 Exportar Excel</button></form></div><div class="bg-slate-800 rounded-lg overflow-x-auto"><table class="w-full text-slate-300"><thead class="bg-slate-700"><tr><th class="px-4 py-2">ID</th><th class="px-4 py-2">Usuário</th><th class="px-4 py-2">Miniatura</th><th class="px-4 py-2">Qtd</th><th class="px-4 py-2">Preço Unit.</th><th class="px-4 py-2">Total</th><th class="px-4 py-2">Status</th></tr></thead><tbody>{reservas_html}</tbody></table></div><div class="bg-slate-800 rounded-lg p-4 mt-6"><h3 class="text-xl text-blue-400 font-bold">Total em Reservas: R$ {total_valor:.2f}</h3></div></div><script>
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Relatório - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen"><nav class="bg-blue-900 p-4 flex justify-between"><a href="/admin" class="text-white font-bold">← Admin</a><span class="text-white font-bold">Relatório de Reservas</span></nav><div class="p-8 max-w-7xl mx-auto"><div class="bg-slate-800 rounded-lg p-6 mb-6"><h2 class="text-2xl text-blue-400 font-bold mb-4">Filtros</h2><form method="GET" class="flex gap-4 flex-wrap"><select name="miniatura" class="bg-slate-700 text-white px-4 py-2 rounded"><option value="">Todas as Miniaturas</option>{''.join([f'<option value="{m}"{"selected" if m == filtro_miniatura else ""}>{m}</option>' for m in miniaturas])}</select><select name="usuario" class="bg-slate-700 text-white px-4 py-2 rounded"><option value="">Todos os Usuários</option>{''.join([f'<option value="{u}"{"selected" if u == filtro_usuario else ""}>{u}</option>' for u in usuarios])}</select><button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded font-bold">Filtrar</button><button type="button" onclick="exportarExcel()" class="bg-green-600 text-white px-4 py-2 rounded font-bold">📊 Exportar Excel</button></form></div><div class="bg-slate-800 rounded-lg overflow-x-auto"><table class="w-full text-slate-300"><thead class="bg-slate-700"><tr><th class="px-4 py-2">ID</th><th class="px-4 py-2">Usuário</th><th class="px-4 py-2">Miniatura</th><th class="px-4 py-2">Qtd</th><th class="px-4 py-2">Preço Unit.</th><th class="px-4 py-2">Total</th><th class="px-4 py-2">Status</th><th class="px-4 py-2">Editar</th><th class="px-4 py-2">Cancelar</th></tr></thead><tbody>{reservas_html}</tbody></table></div><div class="bg-slate-800 rounded-lg p-4 mt-6"><h3 class="text-xl text-blue-400 font-bold">Total em Reservas: R$ {total_valor:.2f}</h3></div></div><script>
+function editarReserva(id, qtd, status) {{
+  let novaQtd = prompt("Editar quantidade (atual: " + qtd + "):");
+  let novoStatus = prompt("Status (pending/confirmed/cancelled) [atual: " + status + "]:");
+  
+  if (novaQtd && novoStatus) {{
+    fetch("/admin/edit-reserva/" + id, {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify({{quantidade: parseInt(novaQtd), status: novoStatus}})
+    }})
+    .then(r => r.json())
+    .then(data => {{
+      if (data.success) {{
+        alert("Reserva atualizada!");
+        location.reload();
+      }} else {{
+        alert("ERRO: " + data.error);
+      }}
+    }});
+  }}
+}}
+
+function cancelarReservaAdmin(id, miniaturaId, qtd) {{
+  if (confirm("Cancelar esta reserva?")) {{
+    fetch("/admin/cancelar-reserva-admin/" + id, {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify({{miniatura_id: miniaturaId, quantidade: qtd}})
+    }})
+    .then(r => r.json())
+    .then(data => {{
+      if (data.success) {{
+        alert("Reserva cancelada!");
+        location.reload();
+      }} else {{
+        alert("ERRO: " + data.error);
+      }}
+    }});
+  }}
+}}
+
 function exportarExcel() {{
   let miniatura = new URLSearchParams(window.location.search).get('miniatura') || '';
   let usuario = new URLSearchParams(window.location.search).get('usuario') || '';
   window.location.href = '/export-relatorio-reservas?miniatura=' + miniatura + '&usuario=' + usuario;
 }}
 </script></body></html>''')
+
+@app.route('/admin/edit-reserva/<int:reserva_id>', methods=['POST'])
+@login_required
+@admin_required
+def edit_reserva(reserva_id):
+    data = request.get_json()
+    quantidade = data.get('quantidade')
+    status = data.get('status')
+    
+    if status not in ['pending', 'confirmed', 'cancelled']:
+        return {'success': False, 'error': 'Status inválido'}, 400
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute('SELECT quantity, status FROM reservations WHERE id = ?', (reserva_id,))
+        reserva = c.fetchone()
+        
+        if not reserva:
+            return {'success': False, 'error': 'Reserva não encontrada'}, 404
+        
+        old_quantity = reserva[0]
+        old_status = reserva[1]
+        
+        if quantidade != old_quantity:
+            c.execute('SELECT miniatura_id FROM reservations WHERE id = ?', (reserva_id,))
+            miniatura_id = c.fetchone()[0]
+            
+            diff = old_quantity - quantidade
+            c.execute('UPDATE miniaturas SET stock = stock + ? WHERE id = ?', (diff, miniatura_id))
+        
+        c.execute('UPDATE reservations SET quantity = ?, status = ? WHERE id = ?', 
+                  (quantidade, status, reserva_id))
+        conn.commit()
+        return {'success': True}
+    except Exception as e:
+        conn.rollback()
+        return {'success': False, 'error': str(e)}, 500
+    finally:
+        conn.close()
+
+@app.route('/admin/cancelar-reserva-admin/<int:reserva_id>', methods=['POST'])
+@login_required
+@admin_required
+def cancelar_reserva_admin(reserva_id):
+    data = request.get_json()
+    miniatura_id = data.get('miniatura_id')
+    quantidade = data.get('quantidade')
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute('SELECT status FROM reservations WHERE id = ?', (reserva_id,))
+        reserva = c.fetchone()
+        
+        if reserva[0] == 'cancelled':
+            return {'success': False, 'error': 'Já cancelada'}, 400
+        
+        c.execute('UPDATE miniaturas SET stock = stock + ? WHERE id = ?', (quantidade, miniatura_id))
+        c.execute('UPDATE reservations SET status = "cancelled" WHERE id = ?', (reserva_id,))
+        conn.commit()
+        return {'success': True}
+    except Exception as e:
+        conn.rollback()
+        return {'success': False, 'error': str(e)}, 500
+    finally:
+        conn.close()
 
 @app.route('/export-relatorio-reservas')
 @login_required
@@ -918,7 +1026,7 @@ def export_relatorio_reservas():
 def lista_espera():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''SELECT wl.id, u.name, m.name, wl.notification_sent 
+    c.execute('''SELECT wl.id, u.name, u.email, m.name, wl.notification_sent 
                  FROM waitlist wl 
                  JOIN users u ON wl.user_id = u.id 
                  JOIN miniaturas m ON wl.miniatura_id = m.id''')
@@ -927,10 +1035,10 @@ def lista_espera():
     
     html = ""
     for w in waitlist:
-        status = "✓ Enviada" if w[3] else "⏳ Pendente"
-        html += f'<tr class="border-b"><td class="px-4 py-2">{w[0]}</td><td class="px-4 py-2">{w[1]}</td><td class="px-4 py-2">{w[2]}</td><td class="px-4 py-2">{status}</td><td class="px-4 py-2"><button onclick="marcarNotificado({w[0]})" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">Marcar</button></td></tr>'
+        status = "✓ Enviada" if w[4] else "⏳ Pendente"
+        html += f'<tr class="border-b"><td class="px-4 py-2 text-white">{w[0]}</td><td class="px-4 py-2 text-white">{w[1]}</td><td class="px-4 py-2 text-white">{w[2]}</td><td class="px-4 py-2 text-white">{w[3]}</td><td class="px-4 py-2 text-white">{status}</td><td class="px-4 py-2"><button onclick="marcarNotificado({w[0]})" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">Marcar</button></td></tr>'
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Lista de Espera</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen"><nav class="bg-blue-900 p-4"><a href="/admin" class="text-white">← Voltar</a></nav><div class="p-8"><h1 class="text-3xl text-blue-400 font-bold mb-6">Lista de Espera</h1><table class="w-full bg-slate-800 rounded"><thead class="bg-slate-700"><tr><th class="px-4 py-2">ID</th><th class="px-4 py-2">Usuário</th><th class="px-4 py-2">Miniatura</th><th class="px-4 py-2">Status</th><th class="px-4 py-2">Ação</th></tr></thead><tbody>{html}</tbody></table></div><script>
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Lista de Espera</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen"><nav class="bg-blue-900 p-4"><a href="/admin" class="text-white">← Voltar</a></nav><div class="p-8"><h1 class="text-3xl text-blue-400 font-bold mb-6">Lista de Espera</h1><table class="w-full bg-slate-800 rounded"><thead class="bg-slate-700"><tr><th class="px-4 py-2 text-white">ID</th><th class="px-4 py-2 text-white">Usuário</th><th class="px-4 py-2 text-white">Email</th><th class="px-4 py-2 text-white">Miniatura</th><th class="px-4 py-2 text-white">Status</th><th class="px-4 py-2 text-white">Ação</th></tr></thead><tbody>{html}</tbody></table></div><script>
 function marcarNotificado(id) {{
   fetch("/admin/mark-notified/" + id, {{method: "POST"}}).then(() => location.reload());
 }}
