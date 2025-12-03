@@ -66,10 +66,11 @@ def init_db():
     conn.close()
     print("OK BD inicializado")
 
-def load_initial_data():
+def load_initial_users():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
+    # Cria usuário admin se não existir
     c.execute("SELECT * FROM users WHERE email = 'admin@jgminis.com.br'")
     if not c.fetchone():
         hashed_password = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -77,31 +78,44 @@ def load_initial_data():
                   ('Admin', 'admin@jgminis.com.br', '5511999999999', hashed_password, 1))
         print("OK Usuário admin adicionado.")
 
+    # Cria usuário de teste se não existir
     c.execute("SELECT * FROM users WHERE email = 'usuario@example.com'")
     if not c.fetchone():
         hashed_password = bcrypt.hashpw('usuario123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         c.execute("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, ?)",
                   ('Usuário Teste', 'usuario@example.com', '5511988888888', hashed_password, 0))
         print("OK Usuário teste adicionado.")
+    
+    conn.commit()
+    conn.close()
 
+def reload_miniatures_data():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    # Limpa miniaturas existentes e dados relacionados para recarregar
+    c.execute("DELETE FROM miniaturas")
+    c.execute("DELETE FROM reservations") # Limpa reservas para evitar problemas de chave estrangeira
+    c.execute("DELETE FROM waitlist") # Limpa lista de espera para evitar problemas de chave estrangeira
+
+    # Novos dados das miniaturas com as URLs e preços corrigidos
     miniaturas_data = [
-        ("https://i.imgur.com/2Y0Y0Y0.jpeg", "Toyota Supra VeilSide Combat V-I White", "2025-01-15", 12, 120.00, "Edição limitada", 1),
-        ("https://i.imgur.com/3Z3Z3Z3.jpeg", "Acura ARX-06 GTP #93 Acura Meyer Shank Racing 2025 IMSA Daytona 24 Hrs", "2025-02-20", 12, 130.00, "Pré-venda", 1),
-        ("https://i.imgur.com/4W4W4W4.jpeg", "Toyota GR86 LB Nation Advan", "2025-03-10", 12, 130.00, "Novo lançamento", 1),
-        ("https://i.imgur.com/5X5X5X5.jpeg", "Chevrolet Corvette Z06 GT3.R #13 AWA 2025 IMSA Daytona 24 Hrs", "2025-04-05", 12, 130.00, "Embalagem especial", 1),
-        ("https://i.imgur.com/6Y6Y6Y6.jpeg", "Nissan LB Works HAKOSUKA Baby Blue", "2025-05-25", 12, 120.00, "Cor exclusiva", 1),
-        ("https://i.imgur.com/7Z7Z7Z7.jpeg", "Ford Mustang Dark Horse #24 Ford Performance Racing School", "2025-06-18", 12, 130.00, "Edição de corrida", 1),
+        ("https://i.imgur.com/UyJNI32.jpeg", "Toyota Supra VeilSide Combat V-I White", "2025-01-15", 12, 120.00, "Edição limitada", 1),
+        ("https://i.imgur.com/vKstzvh.jpeg", "Acura ARX-06 GTP #93 Acura Meyer Shank Racing 2025 IMSA Daytona 24 Hrs", "2025-02-20", 12, 130.00, "Pré-venda", 1),
+        ("https://i.imgur.com/ogSdQvt.jpeg", "Toyota GR86 LB Nation Advan", "2025-03-10", 12, 130.00, "Novo lançamento", 1),
+        ("https://i.imgur.com/33wOg1m.jpeg", "Chevrolet Corvette Z06 GT3.R #13 AWA 2025 IMSA Daytona 24 Hrs", "2025-04-05", 12, 130.00, "Embalagem especial", 1),
+        ("https://i.imgur.com/GdvxWcW.jpeg", "Nissan LB Works HAKOSUKA Baby Blue", "2025-05-25", 12, 120.00, "Cor exclusiva", 1),
+        ("https://i.imgur.com/SljHsh1.jpeg", "Ford Mustang Dark Horse #24 Ford Performance Racing School", "2025-06-18", 12, 130.00, "Edição de corrida", 1),
     ]
 
-    print("Carregando dados da planilha...")
+    print("Carregando dados das miniaturas...")
     for data in miniaturas_data:
-        c.execute("SELECT id FROM miniaturas WHERE name = ?", (data[1],))
-        if not c.fetchone():
-            c.execute("INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) VALUES (?, ?, ?, ?, ?, ?, ?)", data)
-            print(f"  OK {data[1]} - R$ {data[4]:.2f} ({data[3]} em estoque)")
+        c.execute("INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) VALUES (?, ?, ?, ?, ?, ?, ?)", data)
+        print(f"  OK {data[1]} - R$ {data[4]:.2f} ({data[3]} em estoque)")
     conn.commit()
     conn.close()
     print(f"OK Total carregado: {len(miniaturas_data)} miniaturas")
+
 
 # --- Decoradores ---
 def login_required(f):
@@ -342,6 +356,11 @@ def index():
             <a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a>
             <a href="/pessoas" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Pessoas</a>
             <a href="/lista-espera" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">Lista de Espera</a>
+            <form action="/admin/update-miniatures" method="POST" class="inline-block">
+                <button type="submit" class="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-semibold flex items-center gap-2">
+                    <i class="fas fa-sync-alt"></i> Atualizar Planilha
+                </button>
+            </form>
         '''
     
     page = '''<!DOCTYPE html>
@@ -616,6 +635,7 @@ def admin_panel():
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Admin - JG MINIS</title>
             <script src="https://cdn.tailwindcss.com"></script>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         </head>
         <body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen text-slate-200">
             <nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50">
@@ -625,6 +645,11 @@ def admin_panel():
                         <a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Catálogo</a>
                         <a href="/pessoas" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Pessoas</a>
                         <a href="/lista-espera" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">Lista de Espera</a>
+                        <form action="/admin/update-miniatures" method="POST" class="inline-block">
+                            <button type="submit" class="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-semibold flex items-center gap-2">
+                                <i class="fas fa-sync-alt"></i> Atualizar Planilha
+                            </button>
+                        </form>
                         <a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a>
                     </div>
                 </div>
@@ -917,6 +942,11 @@ def pessoas():
                         <a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Catálogo</a>
                         <a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a>
                         <a href="/lista-espera" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">Lista de Espera</a>
+                        <form action="/admin/update-miniatures" method="POST" class="inline-block">
+                            <button type="submit" class="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-semibold flex items-center gap-2">
+                                <i class="fas fa-sync-alt"></i> Atualizar Planilha
+                            </button>
+                        </form>
                         <a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a>
                     </div>
                 </div>
@@ -1116,6 +1146,11 @@ def lista_espera():
                         <a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Catálogo</a>
                         <a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a>
                         <a href="/pessoas" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Pessoas</a>
+                        <form action="/admin/update-miniatures" method="POST" class="inline-block">
+                            <button type="submit" class="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-semibold flex items-center gap-2">
+                                <i class="fas fa-sync-alt"></i> Atualizar Planilha
+                            </button>
+                        </form>
                         <a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a>
                     </div>
                 </div>
@@ -1243,9 +1278,21 @@ def add_to_waitlist():
     finally:
         conn.close()
 
+@app.route('/admin/update-miniatures', methods=['POST'])
+@login_required
+@admin_required
+def update_miniatures():
+    try:
+        reload_miniatures_data()
+        flash('Dados das miniaturas atualizados com sucesso!', 'success')
+    except Exception as e:
+        flash(f'Erro ao atualizar dados das miniaturas: {e}', 'error')
+    return redirect(url_for('admin_panel'))
+
 # --- Inicialização ---
 init_db()
-load_initial_data()
+load_initial_users() # Carrega usuários (admin e teste) se não existirem
+reload_miniatures_data() # Carrega miniaturas (limpa e recarrega)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
