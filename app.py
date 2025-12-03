@@ -11,6 +11,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 from io import BytesIO
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'sua_chave_secreta_aqui')
@@ -19,12 +22,39 @@ WHATSAPP_NUMERO = os.environ.get('WHATSAPP_NUMERO', '5511999999999')
 GOOGLE_SHEETS_ID = '1sxlvo6j-UTB0xXuyivzWnhRuYvpJFcH2smL4ZzHTUps'
 GOOGLE_SHEETS_SHEET = 'Miniaturas'
 
+# Configurações de Email
+EMAIL_SENDER = os.environ.get('EMAIL_SENDER', 'seu_email@gmail.com')
+EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', 'sua_senha_app')
+SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
+SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
+
+def enviar_email(destinatario, assunto, corpo_html):
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = assunto
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = destinatario
+        
+        parte_html = MIMEText(corpo_html, 'html', 'utf-8')
+        msg.attach(parte_html)
+        
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"Email enviado para {destinatario}")
+        return True
+    except Exception as e:
+        print(f"Erro ao enviar email: {e}")
+        return False
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, phone TEXT, password TEXT NOT NULL, is_admin INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS miniaturas (id INTEGER PRIMARY KEY AUTOINCREMENT, image_url TEXT NOT NULL, name TEXT NOT NULL, arrival_date TEXT, stock INTEGER DEFAULT 0, price REAL DEFAULT 0.0, observations TEXT, max_reservations_per_user INTEGER DEFAULT 1)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS reservations (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, miniatura_id INTEGER NOT NULL, quantity INTEGER NOT NULL, reservation_date TEXT NOT NULL, status TEXT DEFAULT 'pending', FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (miniatura_id) REFERENCES miniaturas(id))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS reservations (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, miniatura_id INTEGER NOT NULL, quantity INTEGER NOT NULL, reservation_date TEXT NOT NULL, status TEXT DEFAULT 'confirmed', confirmacao_enviada INTEGER DEFAULT 0, FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (miniatura_id) REFERENCES miniaturas(id))''')
     c.execute('''CREATE TABLE IF NOT EXISTS waitlist (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, miniatura_id INTEGER NOT NULL, email TEXT NOT NULL, notification_sent INTEGER DEFAULT 0, request_date TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (miniatura_id) REFERENCES miniaturas(id))''')
     conn.commit()
     conn.close()
@@ -133,7 +163,7 @@ def register():
         if password != confirm_password:
             flash('As senhas não coincidem.', 'error')
             return redirect(url_for('register'))
-        if len(password) < 6:
+        if len(password) &lt; 6:
             flash('A senha deve ter pelo menos 6 caracteres.', 'error')
             return redirect(url_for('register'))
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -186,7 +216,7 @@ def index():
     
     items_html = ""
     for m in miniaturas:
-        is_esgotado = m[4] <= 0
+        is_esgotado = m[4] &lt;= 0
         status = "ESGOTADO" if is_esgotado else f"Em Estoque: {m[4]}"
         status_color = "red" if is_esgotado else "green"
         
@@ -241,7 +271,7 @@ function decrementarQtd() {
 
 function incrementarQtd() {
   let input = document.getElementById("quantidadeInput");
-  if (parseInt(input.value) < maxQtd) input.value = parseInt(input.value) + 1;
+  if (parseInt(input.value) &lt; maxQtd) input.value = parseInt(input.value) + 1;
 }
 
 function confirmarReserva() {
@@ -256,7 +286,7 @@ function confirmarReserva() {
   .then(r => r.json())
   .then(data => {
     if (data.success) {
-      alert("Reserva realizada com sucesso!");
+      alert("Reserva realizada com sucesso! Verifique seu email para confirmação.");
       location.reload();
     } else {
       alert("ERRO: " + data.error);
@@ -295,14 +325,16 @@ def reservar():
     miniatura_id = data.get('miniatura_id')
     quantidade = data.get('quantidade')
     user_id = request.user.get('user_id')
+    user_email = request.user.get('email')
+    user_name = request.user.get('name')
     
-    if not miniatura_id or not quantidade or quantidade <= 0:
+    if not miniatura_id or not quantidade or quantidade &lt;= 0:
         return {'success': False, 'error': 'Dados inválidos.'}, 400
     
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
-        c.execute('SELECT stock, max_reservations_per_user FROM miniaturas WHERE id = ?', (miniatura_id,))
+        c.execute('SELECT stock, max_reservations_per_user, price, name FROM miniaturas WHERE id = ?', (miniatura_id,))
         miniatura = c.fetchone()
         
         if not miniatura:
@@ -310,20 +342,90 @@ def reservar():
         
         current_stock = miniatura[0]
         max_reservations_per_user = miniatura[1]
+        preco = miniatura[2]
+        nome_miniatura = miniatura[3]
         
         if quantidade > current_stock:
             return {'success': False, 'error': f'Quantidade solicitada ({quantidade}) excede o estoque disponível ({current_stock}).'}, 400
         
-        c.execute('SELECT COALESCE(SUM(quantity), 0) FROM reservations WHERE user_id = ? AND miniatura_id = ? AND status = "pending"', (user_id, miniatura_id))
+        c.execute('SELECT COALESCE(SUM(quantity), 0) FROM reservations WHERE user_id = ? AND miniatura_id = ? AND status = "confirmed"', (user_id, miniatura_id))
         existing_reservations_sum = c.fetchone()[0]
         
         if (existing_reservations_sum + quantidade) > max_reservations_per_user:
             return {'success': False, 'error': f'Você já tem {existing_reservations_sum} reservas para esta miniatura. O máximo permitido é {max_reservations_per_user}.'}, 400
         
         c.execute('UPDATE miniaturas SET stock = stock - ? WHERE id = ?', (quantidade, miniatura_id))
-        c.execute('INSERT INTO reservations (user_id, miniatura_id, quantity, reservation_date, status) VALUES (?, ?, ?, ?, ?)', 
-                  (user_id, miniatura_id, quantidade, datetime.now().isoformat(), 'confirmed'))
+        c.execute('INSERT INTO reservations (user_id, miniatura_id, quantity, reservation_date, status, confirmacao_enviada) VALUES (?, ?, ?, ?, ?, ?)', 
+                  (user_id, miniatura_id, quantidade, datetime.now().isoformat(), 'confirmed', 0))
+        
+        reserva_id = c.lastrowid
         conn.commit()
+        
+        # Enviar email de confirmação
+        total = quantidade * preco
+        corpo_email = f'''
+        <html>
+            <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
+                <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; padding: 30px; border-left: 5px solid #3b82f6;">
+                    <h1 style="color: #1e40af; text-align: center; margin-bottom: 30px;">🎉 Reserva Confirmada!</h1>
+                    
+                    <div style="background-color: #f0f9ff; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                        <p style="margin: 0; color: #333;"><strong>Olá, {user_name}!</strong></p>
+                        <p style="color: #666; margin-top: 10px;">Sua reserva foi confirmada com sucesso! Aqui estão os detalhes:</p>
+                    </div>
+                    
+                    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+                        <h3 style="color: #1e40af; margin-top: 0;">📦 Detalhes da Reserva:</h3>
+                        <table style="width: 100%; border-collapse: collapse;">
+                            <tr style="border-bottom: 1px solid #e0e0e0;">
+                                <td style="padding: 10px 0; color: #666;"><strong>ID da Reserva:</strong></td>
+                                <td style="padding: 10px 0; color: #333; text-align: right;">{reserva_id}</td>
+                            </tr>
+                            <tr style="border-bottom: 1px solid #e0e0e0;">
+                                <td style="padding: 10px 0; color: #666;"><strong>Miniatura:</strong></td>
+                                <td style="padding: 10px 0; color: #333; text-align: right;">{nome_miniatura}</td>
+                            </tr>
+                            <tr style="border-bottom: 1px solid #e0e0e0;">
+                                <td style="padding: 10px 0; color: #666;"><strong>Quantidade:</strong></td>
+                                <td style="padding: 10px 0; color: #333; text-align: right;">{quantidade}</td>
+                            </tr>
+                            <tr style="border-bottom: 1px solid #e0e0e0;">
+                                <td style="padding: 10px 0; color: #666;"><strong>Preço Unitário:</strong></td>
+                                <td style="padding: 10px 0; color: #333; text-align: right;">R$ {preco:.2f}</td>
+                            </tr>
+                            <tr style="background-color: #f0f9ff;">
+                                <td style="padding: 15px 0; color: #1e40af;"><strong style="font-size: 16px;">Total:</strong></td>
+                                <td style="padding: 15px 0; color: #1e40af; text-align: right; font-size: 18px;"><strong>R$ {total:.2f}</strong></td>
+                            </tr>
+                        </table>
+                    </div>
+                    
+                    <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+                        <p style="margin: 0; color: #92400e;"><strong>⏱️ Próximas Etapas:</strong></p>
+                        <p style="margin: 10px 0 0 0; color: #92400e; font-size: 14px;">Nossa equipe entrará em contato em breve com informações sobre o pagamento e entrega.</p>
+                    </div>
+                    
+                    <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center;">
+                        <p style="margin: 0; color: #666; font-size: 14px;">Dúvidas? Entre em contato conosco via WhatsApp</p>
+                        <a href="https://wa.me/{WHATSAPP_NUMERO}" style="display: inline-block; margin-top: 10px; padding: 10px 20px; background-color: #25d366; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">💬 Fale Conosco no WhatsApp</a>
+                    </div>
+                    
+                    <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0;">
+                        <p style="color: #999; font-size: 12px; margin: 0;">JG MINIS - Pré-vendas de Miniaturas</p>
+                        <p style="color: #999; font-size: 12px; margin: 5px 0 0 0;">Obrigado por sua confiança!</p>
+                    </div>
+                </div>
+            </body>
+        </html>
+        '''
+        
+        enviar_email(user_email, '✅ Sua Reserva foi Confirmada - JG MINIS', corpo_email)
+        
+        # Marcar como confirmação enviada
+        c = conn.cursor()
+        c.execute('UPDATE reservations SET confirmacao_enviada = 1 WHERE id = ?', (reserva_id,))
+        conn.commit()
+        
         return {'success': True, 'message': 'Reserva realizada com sucesso!'}
     except Exception as e:
         conn.rollback()
@@ -365,7 +467,7 @@ def minhas_reservas():
     user_id = request.user.get('user_id')
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''SELECT r.id, m.name, m.image_url, r.quantity, r.reservation_date, r.status, m.price 
+    c.execute('''SELECT r.id, m.name, m.image_url, r.quantity, r.reservation_date, r.status, m.price, r.confirmacao_enviada
                  FROM reservations r 
                  JOIN miniaturas m ON r.miniatura_id = m.id 
                  WHERE r.user_id = ? 
@@ -382,6 +484,10 @@ def minhas_reservas():
             status_color = {'pending': 'bg-yellow-600', 'confirmed': 'bg-green-600', 'cancelled': 'bg-red-600'}.get(r[5], 'bg-gray-600')
             status_text = r[5].capitalize()
             
+            confirmacao_badge = ''
+            if r[7]:
+                confirmacao_badge = '<span class="ml-2 bg-blue-600 text-white px-3 py-1 rounded-full text-sm font-bold">✅ Email Enviado</span>'
+            
             reservas_html += f'''<div class="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-lg border-2 border-blue-600 overflow-hidden flex flex-col md:flex-row items-center p-4 gap-4">
 <img src="{r[2]}" class="w-32 h-32 object-cover rounded-lg" alt="{r[1]}">
 <div class="flex-grow">
@@ -390,7 +496,9 @@ def minhas_reservas():
 <p class="text-sm text-slate-400">Preço Unitário: R$ {r[6]:.2f}</p>
 <p class="text-sm text-slate-400">Total: R$ {total_price:.2f}</p>
 <p class="text-sm text-slate-400">Data da Reserva: {r[4].split('T')[0]}</p>
-<span class="{status_color} text-white px-3 py-1 rounded-full text-sm font-bold mt-2 inline-block">{status_text}</span>
+<div class="flex items-center mt-2">
+<span class="{status_color} text-white px-3 py-1 rounded-full text-sm font-bold">{status_text}</span>{confirmacao_badge}
+</div>
 </div>
 <div class="flex flex-col gap-2">
 <button onclick="cancelarReserva({r[0]})" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Cancelar</button>
@@ -485,7 +593,7 @@ def mudar_senha():
         flash('As novas senhas não coincidem.', 'error')
         return redirect(url_for('perfil'))
     
-    if len(nova_senha) < 6:
+    if len(nova_senha) &lt; 6:
         flash('A nova senha deve ter pelo menos 6 caracteres.', 'error')
         return redirect(url_for('perfil'))
     
@@ -758,7 +866,7 @@ def change_password(user_id):
     data = request.get_json()
     nova_senha = data.get('nova_senha')
     
-    if not nova_senha or len(nova_senha) < 6:
+    if not nova_senha or len(nova_senha) &lt; 6:
         return {'success': False, 'error': 'Senha deve ter no mínimo 6 caracteres'}, 400
     
     hashed = bcrypt.hashpw(nova_senha.encode(), bcrypt.gensalt()).decode()
@@ -819,7 +927,7 @@ def relatorio_reservas():
     c.execute('SELECT DISTINCT name FROM users WHERE is_admin = 0 ORDER BY name')
     usuarios = [row[0] for row in c.fetchall()]
     
-    query = '''SELECT r.id, u.name, m.name, r.quantity, m.price, r.reservation_date, r.status, r.miniatura_id, r.user_id
+    query = '''SELECT r.id, u.name, m.name, r.quantity, m.price, r.reservation_date, r.status, r.miniatura_id, r.user_id, r.confirmacao_enviada
                FROM reservations r
                JOIN users u ON r.user_id = u.id
                JOIN miniaturas m ON r.miniatura_id = m.id
@@ -845,15 +953,16 @@ def relatorio_reservas():
     total_valor = 0
     
     if not reservas:
-        reservas_html = '<tr><td colspan="9" class="px-4 py-3 text-center text-slate-400">Nenhuma reserva encontrada</td></tr>'
+        reservas_html = '<tr><td colspan="10" class="px-4 py-3 text-center text-slate-400">Nenhuma reserva encontrada</td></tr>'
     else:
         for r in reservas:
             total = r[3] * r[4]
             total_valor += total
             status_color = {'pending': 'yellow', 'confirmed': 'green', 'cancelled': 'red'}.get(r[6], 'gray')
-            reservas_html += f'<tr class="border-b"><td class="px-4 py-2">{r[0]}</td><td class="px-4 py-2">{r[1]}</td><td class="px-4 py-2">{r[2]}</td><td class="px-4 py-2">{r[3]}</td><td class="px-4 py-2">R$ {r[4]:.2f}</td><td class="px-4 py-2">R$ {total:.2f}</td><td class="px-4 py-2"><span class="bg-{status_color}-600 text-white px-2 py-1 rounded text-sm">{r[6]}</span></td><td class="px-4 py-2"><button onclick="editarReserva({r[0]}, {r[3]}, \'{r[6]}\')" class="bg-blue-600 text-white px-3 py-1 rounded text-sm">Editar</button></td><td class="px-4 py-2"><button onclick="cancelarReservaAdmin({r[0]}, {r[7]}, {r[3]})" class="bg-red-600 text-white px-3 py-1 rounded text-sm">Cancelar</button></td></tr>'
+            confirmacao_badge = '✅' if r[9] else '❌'
+            reservas_html += f'<tr class="border-b"><td class="px-4 py-2">{r[0]}</td><td class="px-4 py-2">{r[1]}</td><td class="px-4 py-2">{r[2]}</td><td class="px-4 py-2">{r[3]}</td><td class="px-4 py-2">R$ {r[4]:.2f}</td><td class="px-4 py-2">R$ {total:.2f}</td><td class="px-4 py-2"><span class="bg-{status_color}-600 text-white px-2 py-1 rounded text-sm">{r[6]}</span></td><td class="px-4 py-2 text-center">{confirmacao_badge}</td><td class="px-4 py-2"><button onclick="editarReserva({r[0]}, {r[3]}, \'{r[6]}\')" class="bg-blue-600 text-white px-3 py-1 rounded text-sm">Editar</button></td><td class="px-4 py-2"><button onclick="cancelarReservaAdmin({r[0]}, {r[7]}, {r[3]})" class="bg-red-600 text-white px-3 py-1 rounded text-sm">Cancelar</button></td></tr>'
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Relatório - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen"><nav class="bg-blue-900 p-4 flex justify-between"><a href="/admin" class="text-white font-bold">← Admin</a><span class="text-white font-bold">Relatório de Reservas</span></nav><div class="p-8 max-w-7xl mx-auto"><div class="bg-slate-800 rounded-lg p-6 mb-6"><h2 class="text-2xl text-blue-400 font-bold mb-4">Filtros</h2><form method="GET" class="flex gap-4 flex-wrap"><select name="miniatura" class="bg-slate-700 text-white px-4 py-2 rounded"><option value="">Todas as Miniaturas</option>{''.join([f'<option value="{m}"{"selected" if m == filtro_miniatura else ""}>{m}</option>' for m in miniaturas])}</select><select name="usuario" class="bg-slate-700 text-white px-4 py-2 rounded"><option value="">Todos os Usuários</option>{''.join([f'<option value="{u}"{"selected" if u == filtro_usuario else ""}>{u}</option>' for u in usuarios])}</select><button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded font-bold">Filtrar</button><button type="button" onclick="exportarExcel()" class="bg-green-600 text-white px-4 py-2 rounded font-bold">📊 Exportar Excel</button></form></div><div class="bg-slate-800 rounded-lg overflow-x-auto"><table class="w-full text-slate-300"><thead class="bg-slate-700"><tr><th class="px-4 py-2">ID</th><th class="px-4 py-2">Usuário</th><th class="px-4 py-2">Miniatura</th><th class="px-4 py-2">Qtd</th><th class="px-4 py-2">Preço Unit.</th><th class="px-4 py-2">Total</th><th class="px-4 py-2">Status</th><th class="px-4 py-2">Editar</th><th class="px-4 py-2">Cancelar</th></tr></thead><tbody>{reservas_html}</tbody></table></div><div class="bg-slate-800 rounded-lg p-4 mt-6"><h3 class="text-xl text-blue-400 font-bold">Total em Reservas: R$ {total_valor:.2f}</h3></div></div><script>
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Relatório - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen"><nav class="bg-blue-900 p-4 flex justify-between"><a href="/admin" class="text-white font-bold">← Admin</a><span class="text-white font-bold">Relatório de Reservas</span></nav><div class="p-8 max-w-7xl mx-auto"><div class="bg-slate-800 rounded-lg p-6 mb-6"><h2 class="text-2xl text-blue-400 font-bold mb-4">Filtros</h2><form method="GET" class="flex gap-4 flex-wrap"><select name="miniatura" class="bg-slate-700 text-white px-4 py-2 rounded"><option value="">Todas as Miniaturas</option>{''.join([f'<option value="{m}"{"selected" if m == filtro_miniatura else ""}>{m}</option>' for m in miniaturas])}</select><select name="usuario" class="bg-slate-700 text-white px-4 py-2 rounded"><option value="">Todos os Usuários</option>{''.join([f'<option value="{u}"{"selected" if u == filtro_usuario else ""}>{u}</option>' for u in usuarios])}</select><button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded font-bold">Filtrar</button><button type="button" onclick="exportarExcel()" class="bg-green-600 text-white px-4 py-2 rounded font-bold">📊 Exportar Excel</button></form></div><div class="bg-slate-800 rounded-lg overflow-x-auto"><table class="w-full text-slate-300 text-sm"><thead class="bg-slate-700"><tr><th class="px-4 py-2">ID</th><th class="px-4 py-2">Usuário</th><th class="px-4 py-2">Miniatura</th><th class="px-4 py-2">Qtd</th><th class="px-4 py-2">Preço Unit.</th><th class="px-4 py-2">Total</th><th class="px-4 py-2">Status</th><th class="px-4 py-2">Email</th><th class="px-4 py-2">Editar</th><th class="px-4 py-2">Cancelar</th></tr></thead><tbody>{reservas_html}</tbody></table></div><div class="bg-slate-800 rounded-lg p-4 mt-6"><h3 class="text-xl text-blue-400 font-bold">Total em Reservas: R$ {total_valor:.2f}</h3></div></div><script>
 function editarReserva(id, qtd, status) {{
   let novaQtd = prompt("Editar quantidade (atual: " + qtd + "):");
   let novoStatus = prompt("Status (pending/confirmed/cancelled) [atual: " + status + "]:");
@@ -979,7 +1088,7 @@ def export_relatorio_reservas():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    query = '''SELECT u.name, m.name, r.quantity, m.price, r.reservation_date, r.status
+    query = '''SELECT u.name, m.name, r.quantity, m.price, r.reservation_date, r.status, r.confirmacao_enviada
                FROM reservations r
                JOIN users u ON r.user_id = u.id
                JOIN miniaturas m ON r.miniatura_id = m.id
@@ -1004,13 +1113,14 @@ def export_relatorio_reservas():
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Reservas"
-    ws.append(['Usuário', 'Miniatura', 'Quantidade', 'Preço Unit.', 'Total', 'Data', 'Status'])
+    ws.append(['Usuário', 'Miniatura', 'Quantidade', 'Preço Unit.', 'Total', 'Data', 'Status', 'Email Confirmação'])
     
     total_valor = 0
     for r in reservas:
         total = r[2] * r[3]
         total_valor += total
-        ws.append([r[0], r[1], r[2], f'R$ {r[3]:.2f}', f'R$ {total:.2f}', r[4].split('T')[0], r[5]])
+        confirmacao = "Enviado" if r[6] else "Pendente"
+        ws.append([r[0], r[1], r[2], f'R$ {r[3]:.2f}', f'R$ {total:.2f}', r[4].split('T')[0], r[5], confirmacao])
     
     ws.append([])
     ws.append(['TOTAL', '', '', '', f'R$ {total_valor:.2f}'])
