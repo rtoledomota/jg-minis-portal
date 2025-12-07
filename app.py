@@ -10,72 +10,288 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from io import BytesIO
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Font, PatternFill, Alignment
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from pathlib import Path
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'sua_chave_secreta_aqui')
-DB_FILE = 'database.db'
+
+# 📁 Persistência total - Sobrevive reinícios do Cloudflare
+PERSIST_DIR = Path("/tmp") / "JG_MINIS_PERSIST_v4"
+PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_FILE = PERSIST_DIR / "database.db"
+BACKUP_FILE = PERSIST_DIR / "backup_v4.json"
+
 WHATSAPP_NUMERO = os.environ.get('WHATSAPP_NUMERO', '5511999999999')
-GOOGLE_SHEETS_ID = '1sxlvo6j-UTB0xXuyivzWnhRuYvpJFcH2smL4ZzHTUps'
+GOOGLE_SHEETS_ID = os.environ.get('GOOGLE_SHEETS_ID', '1sxlvo6j-UTB0xXuyivzWnhRuYvpJFcH2smL4ZzHTUps')
+BACKUP_SHEETS_ID = '1avMoEA0WddQ7dW92X2NORo-cJSwJb7cpinjsuZMMZqI'  # Sua planilha de backup
 GOOGLE_SHEETS_SHEET = 'Miniaturas'
+BACKUP_RESERVAS_SHEET = 'Backups_Reservas'
+BACKUP_USUARIOS_SHEET = 'Usuarios_Backup'
 LOGO_URL = "https://i.imgur.com/Yp1OiWB.jpeg"
 
-# Configurações de Email
+# Configurações de Email (com fallback simulação)
 EMAIL_SENDER = os.environ.get('EMAIL_SENDER', 'seu_email@gmail.com')
 EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', 'sua_senha_app')
 SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
 
-def enviar_email(destinatario, assunto, corpo_html):
+print(f"🚀 JG MINIS v4.2 - Persistência + Ordenação + Exports + Backups Planilhas: {DB_FILE}")
+
+def get_db_connection():
+    """Conexão com banco persistente"""
+    return sqlite3.connect(str(DB_FILE))
+
+def create_json_backup():
+    """Backup automático JSON - Salva reservas e alterações"""
     try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = assunto
-        msg['From'] = EMAIL_SENDER
-        msg['To'] = destinatario
+        conn = get_db_connection()
+        c = conn.cursor()
         
-        parte_html = MIMEText(corpo_html, 'html', 'utf-8')
-        msg.attach(parte_html)
+        backup_data = {
+            'timestamp': datetime.now().isoformat(),
+            'users': c.execute("SELECT * FROM users").fetchall(),
+            'miniaturas': c.execute("SELECT * FROM miniaturas").fetchall(),
+            'reservations': c.execute("SELECT * FROM reservations").fetchall(),
+            'waitlist': c.execute("SELECT * FROM waitlist").fetchall()
+        }
         
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.send_message(msg)
+        with open(str(BACKUP_FILE), 'w') as f:
+            json.dump(backup_data, f, default=str)
         
-        print(f"Email enviado para {destinatario}")
+        conn.close()
+        print(f"💾 JSON Backup criado: {len(backup_data['reservations'])} reservas")
+        
+        # Backups extras automáticos
+        export_to_excel_reservas()  # Excel local
+        backup_to_google()  # Sua planilha Google
         return True
     except Exception as e:
-        print(f"Erro ao enviar email: {e}")
+        print(f"⚠️ Erro no JSON backup: {e}")
         return False
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, phone TEXT, password TEXT NOT NULL, is_admin INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS miniaturas (id INTEGER PRIMARY KEY AUTOINCREMENT, image_url TEXT NOT NULL, name TEXT NOT NULL, arrival_date TEXT, stock INTEGER DEFAULT 0, price REAL DEFAULT 0.0, observations TEXT, max_reservations_per_user INTEGER DEFAULT 1)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS reservations (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, miniatura_id INTEGER NOT NULL, quantity INTEGER NOT NULL, reservation_date TEXT NOT NULL, status TEXT DEFAULT 'confirmed', confirmacao_enviada INTEGER DEFAULT 0, FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (miniatura_id) REFERENCES miniaturas(id))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS waitlist (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, miniatura_id INTEGER NOT NULL, email TEXT NOT NULL, notification_sent INTEGER DEFAULT 0, request_date TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (miniatura_id) REFERENCES miniaturas(id))''')
-    conn.commit()
-    conn.close()
-    print("OK BD inicializado")
+def restore_backup():
+    """Restauração automática - Recupera reservas perdidas"""
+    if BACKUP_FILE.exists():
+        try:
+            with open(str(BACKUP_FILE), 'r') as f:
+                backup_data = json.load(f)
+            
+            conn = get_db_connection()
+            c = conn.cursor()
+            
+            # Limpa e restaura (preserva admin)
+            c.execute("DELETE FROM waitlist")
+            c.execute("DELETE FROM reservations")
+            c.execute("DELETE FROM miniaturas")
+            c.execute("DELETE FROM users WHERE email != 'admin@jgminis.com.br'")
+            
+            # Restaura
+            for user in backup_data.get('users', []):
+                if user[2] != 'admin@jgminis.com.br':
+                    c.execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?, ?, ?)", user)
+            
+            for mini in backup_data.get('miniaturas', []):
+                # Compatibilidade com created_at
+                if len(mini) == 8:
+                    mini = (*mini, datetime.now().isoformat())
+                c.execute("INSERT OR REPLACE INTO miniaturas VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", mini)
+            
+            for res in backup_data.get('reservations', []):
+                c.execute("INSERT OR REPLACE INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?)", res)
+            
+            for wl in backup_data.get('waitlist', []):
+                c.execute("INSERT OR REPLACE INTO waitlist VALUES (?, ?, ?, ?, ?, ?)", wl)
+            
+            conn.commit()
+            conn.close()
+            
+            num_reservas = len(backup_data.get('reservations', []))
+            print(f"✅ Restaurado: {num_reservas} reservas do backup")
+            
+            BACKUP_FILE.unlink()
+            return True
+        except Exception as e:
+            print(f"⚠️ Erro na restauração: {e}")
+            return False
+    return False
 
-def load_initial_data():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE email = 'admin@jgminis.com.br'")
-    if not c.fetchone():
-        hashed_password = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        c.execute("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, ?)", ('Admin', 'admin@jgminis.com.br', '5511999999999', hashed_password, 1))
-        print("OK Usuário admin adicionado.")
-    c.execute("SELECT * FROM users WHERE email = 'usuario@example.com'")
-    if not c.fetchone():
-        hashed_password = bcrypt.hashpw('usuario123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        c.execute("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, ?)", ('Usuário Teste', 'usuario@example.com', '5511988888888', hashed_password, 0))
-        print("OK Usuário teste adicionado.")
-    conn.commit()
-    conn.close()
+def export_to_excel_reservas():
+    """Export reservas para Excel - Automático (buffer) ou manual (download)"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''SELECT u.name as usuario, m.name as miniatura, r.quantity, r.reservation_date, r.status, m.price, (r.quantity * m.price) as total
+                     FROM reservations r 
+                     JOIN users u ON r.user_id = u.id 
+                     JOIN miniaturas m ON r.miniatura_id = m.id 
+                     ORDER BY r.reservation_date DESC''')
+        reservas = c.fetchall()
+        conn.close()
+        
+        if not reservas:
+            print("Nenhuma reserva para exportar")
+            return None
+        
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Reservas"
+        
+        headers = ['Usuário', 'Miniatura', 'Quantidade', 'Data Reserva', 'Status', 'Preço Unitário', 'Total']
+        ws.append(headers)
+        
+        # Estilo cabeçalhos (azul, bold, branco)
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="3B82F6", end_color="3B82F6", fill_type="solid")
+        for col in range(1, 8):
+            cell = ws.cell(row=1, column=col)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+        
+        for row_data in reservas:
+            ws.append(row_data)
+            # Formatação total
+            ws.cell(ws.max_row, column=7).number_format = 'R$ #,##0.00'
+            # Cor por status
+            status_cell = ws.cell(ws.max_row, column=5)
+            status = row_data[4]
+            if status == 'confirmed':
+                status_cell.fill = PatternFill(start_color="10B981", end_color="10B981", fill_type="solid")
+            elif status == 'cancelled':
+                status_cell.fill = PatternFill(start_color="EF4444", end_color="EF4444", fill_type="solid")
+        
+        # Auto-ajuste colunas
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+        
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        
+        print("✅ Excel backup reservas criado")
+        return buffer
+    except Exception as e:
+        print(f"⚠️ Erro no Excel export reservas: {e}")
+        return None
+
+def export_to_excel_usuarios():
+    """Export usuários para Excel"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT name, email, phone, is_admin FROM users ORDER BY name')
+        usuarios = c.fetchall()
+        conn.close()
+        
+        if not usuarios:
+            print("Nenhuma usuário para exportar")
+            return None
+        
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Usuários"
+        
+        headers = ['Nome', 'Email', 'Telefone', 'Admin']
+        ws.append(headers)
+        
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="8B5CF6", end_color="8B5CF6", fill_type="solid")
+        for col in range(1, 5):
+            cell = ws.cell(row=1, column=col)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+        
+        for row_data in usuarios:
+            ws.append([row_data[0], row_data[1], row_data[2], 'Sim' if row_data[3] else 'Não'])
+        
+        # Auto-ajuste
+        for column in ws.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            adjusted_width = min(max_length + 2, 50)
+            ws.column_dimensions[column_letter].width = adjusted_width
+        
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        
+        print("✅ Excel backup usuários criado")
+        return buffer
+    except Exception as e:
+        print(f"⚠️ Erro no Excel export usuários: {e}")
+        return None
+
+def backup_to_google():
+    """Backup automático para sua planilha Google - Reservas e Usuários"""
+    gc = get_google_sheets()
+    if not gc:
+        print("⚠️ Sem credenciais Google - Backup Sheets pulado")
+        return False
+    
+    try:
+        sheet = gc.open_by_key(BACKUP_SHEETS_ID)
+        
+        # Aba reservas (cria se não existir)
+        try:
+            ws_reservas = sheet.worksheet(BACKUP_RESERVAS_SHEET)
+        except gspread.WorksheetNotFound:
+            ws_reservas = sheet.add_worksheet(title=BACKUP_RESERVAS_SHEET, rows=1000, cols=7)
+        
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''SELECT u.name, m.name, r.quantity, r.reservation_date, r.status, m.price, (r.quantity * m.price)
+                     FROM reservations r JOIN users u ON r.user_id = u.id JOIN miniaturas m ON r.miniatura_id = m.id
+                     ORDER BY r.reservation_date DESC''')
+        reservas = c.fetchall()
+        conn.close()
+        
+        if reservas:
+            ws_reservas.clear()
+            ws_reservas.append_row(['Usuário', 'Miniatura', 'Quantidade', 'Data Reserva', 'Status', 'Preço Unitário', 'Total'])
+            ws_reservas.append_rows(reservas)
+            # Formatação cabeçalho (azul, bold, branco)
+            ws_reservas.format('A1:G1', {"backgroundColor": {"red": 0.23, "green": 0.51, "blue": 0.95}, "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}})
+            print(f"✅ Backup Google Reservas: {len(reservas)} linhas atualizadas na planilha")
+        
+        # Aba usuários (cria se não existir)
+        try:
+            ws_usuarios = sheet.worksheet(BACKUP_USUARIOS_SHEET)
+        except gspread.WorksheetNotFound:
+            ws_usuarios = sheet.add_worksheet(title=BACKUP_USUARIOS_SHEET, rows=1000, cols=4)
+        
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT name, email, phone, is_admin FROM users ORDER BY name')
+        usuarios = c.fetchall()
+        conn.close()
+        
+        if usuarios:
+            ws_usuarios.clear()
+            ws_usuarios.append_row(['Nome', 'Email', 'Telefone', 'Admin'])
+            ws_usuarios.append_rows([[u[0], u[1], u[2], 'Sim' if u[3] else 'Não'] for u in usuarios])
+            # Formatação cabeçalho (roxo, bold, branco)
+            ws_usuarios.format('A1:D1', {"backgroundColor": {"red": 0.55, "green": 0.35, "blue": 0.95}, "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}})
+            print(f"✅ Backup Google Usuários: {len(usuarios)} linhas atualizadas")
+        
+        return True
+    except Exception as e:
+        print(f"⚠️ Erro no backup Google: {e}")
+        return False
 
 def get_google_sheets():
     try:
@@ -89,6 +305,58 @@ def get_google_sheets():
         print(f"Erro ao conectar ao Google Sheets: {e}")
         return None
 
+def enviar_email(destinatario, assunto, corpo_html):
+    try:
+        if EMAIL_SENDER == 'seu_email@gmail.com' or not EMAIL_PASSWORD:
+            print(f"📧 SIMULAÇÃO: Email para {destinatario} - {assunto}")
+            return True
+        
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = assunto
+        msg['From'] = EMAIL_SENDER
+        msg['To'] = destinatario
+        
+        parte_html = MIMEText(corpo_html, 'html', 'utf-8')
+        msg.attach(parte_html)
+        
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"✅ Email enviado para {destinatario}")
+        return True
+    except Exception as e:
+        print(f"⚠️ Erro ao enviar email: {e}")
+        return False
+
+def init_db():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, phone TEXT, password TEXT NOT NULL, is_admin INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS miniaturas (id INTEGER PRIMARY KEY AUTOINCREMENT, image_url TEXT NOT NULL, name TEXT NOT NULL, arrival_date TEXT, stock INTEGER DEFAULT 0, price REAL DEFAULT 0.0, observations TEXT, max_reservations_per_user INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS reservations (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, miniatura_id INTEGER NOT NULL, quantity INTEGER NOT NULL, reservation_date TEXT NOT NULL, status TEXT DEFAULT 'confirmed', confirmacao_enviada INTEGER DEFAULT 0, FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (miniatura_id) REFERENCES miniaturas(id))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS waitlist (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, miniatura_id INTEGER NOT NULL, email TEXT NOT NULL, notification_sent INTEGER DEFAULT 0, request_date TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (miniatura_id) REFERENCES miniaturas(id))''')
+    conn.commit()
+    conn.close()
+    print("✅ BD inicializado com persistência e created_at para ordenação")
+
+def load_initial_data():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE email = 'admin@jgminis.com.br'")
+    if not c.fetchone():
+        hashed_password = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        c.execute("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, ?)", ('Admin', 'admin@jgminis.com.br', '5511999999999', hashed_password, 1))
+        print("✅ Usuário admin adicionado.")
+    c.execute("SELECT * FROM users WHERE email = 'usuario@example.com'")
+    if not c.fetchone():
+        hashed_password = bcrypt.hashpw('usuario123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        c.execute("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, ?)", ('Usuário Teste', 'usuario@example.com', '5511988888888', hashed_password, 0))
+        print("✅ Usuário teste adicionado.")
+    conn.commit()
+    conn.close()
+
 def load_miniaturas_from_sheets():
     gc = get_google_sheets()
     if not gc:
@@ -100,7 +368,7 @@ def load_miniaturas_from_sheets():
         if not rows:
             print("Planilha vazia")
             return
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("DELETE FROM miniaturas")
         for row in rows[1:]:
@@ -113,13 +381,15 @@ def load_miniaturas_from_sheets():
                     price = float(row[5]) if row[5] else 0.0
                     observations = row[6]
                     max_reservations = int(row[7]) if row[7] else 1
-                    c.execute("INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) VALUES (?, ?, ?, ?, ?, ?, ?)", (image_url, name, arrival_date, stock, price, observations, max_reservations))
+                    created_at = datetime.now().isoformat()  # Adiciona created_at
+                    c.execute("INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (image_url, name, arrival_date, stock, price, observations, max_reservations, created_at))
                 except Exception as e:
                     print(f"Erro ao inserir linha: {e}")
                     continue
         conn.commit()
         conn.close()
-        print(f"OK {len(rows)-1} miniaturas carregadas do Google Sheets")
+        print(f"✅ {len(rows)-1} miniaturas carregadas do Google Sheets")
+        create_json_backup()  # Backup após carregar
     except Exception as e:
         print(f"Erro ao carregar planilha: {e}")
 
@@ -128,7 +398,7 @@ def login_required(f):
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
             return redirect(url_for('login'))
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute('SELECT id, name, email, phone, is_admin FROM users WHERE id = ?', (session['user_id'],))
         user = c.fetchone()
@@ -168,25 +438,26 @@ def register():
             flash('A senha deve ter pelo menos 6 caracteres.', 'error')
             return redirect(url_for('register'))
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         c = conn.cursor()
         try:
             c.execute("INSERT INTO users (name, email, phone, password) VALUES (?, ?, ?, ?)", (name, email, phone, hashed_password))
             conn.commit()
+            create_json_backup()  # Backup após novo usuário
             flash('Registro bem-sucedido! Faça login.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError:
             flash('E-mail já registrado.', 'error')
         finally:
             conn.close()
-    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Registrar - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen flex items-center justify-center"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl p-8 max-w-md w-full"><h2 class="text-3xl font-black text-blue-400 mb-6 text-center">Registrar</h2>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<ul class="mb-4">{% for category, message in messages %}<li class="text-{{ 'red' if category == 'error' else 'green' }}-400 text-center">{{ message }}</li>{% endfor %}</ul>{% endif %}{% endwith %}<form method="POST" action="/register" class="space-y-4"><div><label for="name" class="block text-slate-300 font-bold mb-1">Nome:</label><input type="text" id="name" name="name" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="email" class="block text-slate-300 font-bold mb-1">E-mail:</label><input type="email" id="email" name="email" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="phone" class="block text-slate-300 font-bold mb-1">Telefone:</label><input type="text" id="phone" name="phone" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="password" class="block text-slate-300 font-bold mb-1">Senha:</label><input type="password" id="password" name="password" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="confirm_password" class="block text-slate-300 font-bold mb-1">Confirmar Senha:</label><input type="password" id="confirm_password" name="confirm_password" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg hover:from-blue-700 hover:to-red-700 transition duration-300">Registrar</button></form><p class="text-center text-slate-400 mt-6">Já tem uma conta? <a href="/login" class="text-blue-400 hover:underline">Faça Login</a></p></div></body></html>''')
+    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Registrar - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen flex items-center justify-center"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl p-8 max-w-md w-full"><div class="flex justify-center mb-6"><img src="''' + LOGO_URL + '''" class="h-16 rounded-full border-2 border-blue-400" alt="JG MINIS"></div><h2 class="text-3xl font-black text-blue-400 mb-6 text-center">Registrar</h2>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<ul class="mb-4">{% for category, message in messages %}<li class="text-{{ 'red' if category == 'error' else 'green' }}-400 text-center">{{ message }}</li>{% endfor %}</ul>{% endif %}{% endwith %}<form method="POST" action="/register" class="space-y-4"><div><label for="name" class="block text-slate-300 font-bold mb-1">Nome:</label><input type="text" id="name" name="name" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="email" class="block text-slate-300 font-bold mb-1">E-mail:</label><input type="email" id="email" name="email" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="phone" class="block text-slate-300 font-bold mb-1">Telefone:</label><input type="text" id="phone" name="phone" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="password" class="block text-slate-300 font-bold mb-1">Senha:</label><input type="password" id="password" name="password" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="confirm_password" class="block text-slate-300 font-bold mb-1">Confirmar Senha:</label><input type="password" id="confirm_password" name="confirm_password" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg hover:from-blue-700 hover:to-red-700 transition duration-300">Registrar</button></form><p class="text-center text-slate-400 mt-6">Já tem uma conta? <a href="/login" class="text-blue-400 hover:underline">Faça Login</a></p></div></body></html>''')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         email = request.form['email']
         password = request.form['password']
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute('SELECT id, password FROM users WHERE email = ?', (email,))
         user_data = c.fetchone()
@@ -197,7 +468,7 @@ def login():
             return redirect(url_for('index'))
         else:
             flash('E-mail ou senha inválidos.', 'error')
-    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Login - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen flex items-center justify-center"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl p-8 max-w-md w-full"><h2 class="text-3xl font-black text-blue-400 mb-6 text-center">Login</h2>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<ul class="mb-4">{% for category, message in messages %}<li class="text-{{ 'red' if category == 'error' else 'green' }}-400 text-center">{{ message }}</li>{% endfor %}</ul>{% endif %}{% endwith %}<form method="POST" action="/login" class="space-y-4"><div><label for="email" class="block text-slate-300 font-bold mb-1">E-mail:</label><input type="email" id="email" name="email" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="password" class="block text-slate-300 font-bold mb-1">Senha:</label><input type="password" id="password" name="password" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg hover:from-blue-700 hover:to-red-700 transition duration-300">Entrar</button></form><p class="text-center text-slate-400 mt-6">Não tem uma conta? <a href="/register" class="text-blue-400 hover:underline">Registre-se</a></p></div></body></html>''')
+    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Login - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen flex items-center justify-center"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl p-8 max-w-md w-full"><div class="flex justify-center mb-6"><img src="''' + LOGO_URL + '''" class="h-16 rounded-full border-2 border-blue-400" alt="JG MINIS"></div><h2 class="text-3xl font-black text-blue-400 mb-6 text-center">Login</h2>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<ul class="mb-4">{% for category, message in messages %}<li class="text-{{ 'red' if category == 'error' else 'green' }}-400 text-center">{{ message }}</li>{% endfor %}</ul>{% endif %}{% endwith %}<form method="POST" action="/login" class="space-y-4"><div><label for="email" class="block text-slate-300 font-bold mb-1">E-mail:</label><input type="email" id="email" name="email" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><div><label for="password" class="block text-slate-300 font-bold mb-1">Senha:</label><input type="password" id="password" name="password" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600 focus:outline-none focus:border-red-500"></div><button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg hover:from-blue-700 hover:to-red-700 transition duration-300">Entrar</button></form><p class="text-center text-slate-400 mt-6">Não tem uma conta? <a href="/register" class="text-blue-400 hover:underline">Registre-se</a></p></div></body></html>''')
 
 @app.route('/logout')
 @login_required
@@ -209,11 +480,50 @@ def logout():
 @app.route('/')
 @login_required
 def index():
-    conn = sqlite3.connect(DB_FILE)
+    # Ordenação
+    sort_by = request.args.get('sort', 'name')
+    order = request.args.get('order', 'asc')
+    valid_sorts = ['name', 'arrival_date', 'created_at', 'stock']
+    if sort_by not in valid_sorts:
+        sort_by = 'name'
+    if order.lower() not in ['asc', 'desc']:
+        order = 'asc'
+    
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('SELECT id, image_url, name, arrival_date, stock, price, observations, max_reservations_per_user FROM miniaturas')
+    # Usar f-string para ORDER BY é seguro aqui pois sort_by e order são validados
+    query = f'SELECT id, image_url, name, arrival_date, stock, price, observations, max_reservations_per_user, created_at FROM miniaturas ORDER BY {sort_by} {order.upper()}'
+    c.execute(query)
     miniaturas = c.fetchall()
     conn.close()
+    
+    # Filtros HTML
+    filter_html = f'''
+    <div class="mb-6 flex flex-wrap gap-4 items-center">
+        <label for="sort_select" class="text-slate-300 font-bold">Ordenar por:</label>
+        <select id="sort_select" onchange="sortTable(this.value)" class="px-4 py-2 bg-slate-700 text-white rounded-lg border-2 border-blue-600">
+            <option value="name" {"selected" if sort_by == "name" else ""}>Nome</option>
+            <option value="arrival_date" {"selected" if sort_by == "arrival_date" else ""}>Previsão Chegada</option>
+            <option value="created_at" {"selected" if sort_by == "created_at" else ""}>Data Inclusão</option>
+            <option value="stock" {"selected" if sort_by == "stock" else ""}>Disponibilidade</option>
+        </select>
+        <label for="order_select" class="text-slate-300 font-bold">Ordem:</label>
+        <select id="order_select" onchange="sortOrder(this.value)" class="px-4 py-2 bg-slate-700 text-white rounded-lg border-2 border-blue-600">
+            <option value="asc" {"selected" if order == "asc" else ""}>Crescente</option>
+            <option value="desc" {"selected" if order == "desc" else ""}>Decrescente</option>
+        </select>
+    </div>
+    <script>
+    function sortTable(sort) {{
+        let currentOrder = new URLSearchParams(window.location.search).get('order') || 'asc';
+        window.location = '/?sort=' + sort + '&order=' + currentOrder;
+    }}
+    function sortOrder(order) {{
+        let currentSort = new URLSearchParams(window.location.search).get('sort') || 'name';
+        window.location = '/?sort=' + currentSort + '&order=' + order;
+    }}
+    </script>
+    '''
     
     items_html = ""
     for m in miniaturas:
@@ -234,8 +544,9 @@ def index():
 </div>
 <div class="p-4">
 <h3 class="font-bold text-blue-300 mb-2 text-lg">{m[2]}</h3>
-<p class="text-sm text-slate-400 mb-2">Chegada: {m[3]}</p>
-<p class="text-sm text-slate-400 mb-3">{m[6]}</p>
+<p class="text-sm text-slate-400 mb-1">Chegada: {m[3] or 'N/A'}</p>
+<p class="text-sm text-slate-400 mb-1">Incluída: {m[8].split(' ')[0] if m[8] else 'N/A'}</p>
+<p class="text-sm text-slate-400 mb-3">{m[6] or ''}</p>
 <div class="flex justify-between items-center gap-2 mb-3">
 <span class="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">R$ {m[5]:.2f}</span>
 </div>
@@ -247,7 +558,7 @@ def index():
     if request.user.get('is_admin'):
         admin_links = '<a href="/admin" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg font-semibold">Admin</a><a href="/usuarios" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Usuários</a><a href="/lista-espera" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">Lista Espera</a><a href="/relatorio-reservas" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold">📊 Relatório</a>'
     
-    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/perfil" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold">Perfil</a><a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Minhas Reservas</a>''' + admin_links + '''<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">Catálogo de Miniaturas</h1><p class="text-slate-300 mb-8">Pré-vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">''' + items_html + '''</div></div><div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8"><h2 class="text-2xl font-black text-blue-400 mb-4">Confirmar Reserva</h2><div id="confirmContent" class="text-slate-300 mb-6 space-y-3"></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Quantidade:</label><div class="flex gap-2"><button type="button" onclick="decrementarQtd()" class="bg-red-600 text-white font-bold w-12 h-12 rounded-lg">-</button><input type="number" id="quantidadeInput" value="1" min="1" class="flex-1 bg-slate-700 text-white font-bold text-center rounded-lg border-2 border-blue-600"><button type="button" onclick="incrementarQtd()" class="bg-green-600 text-white font-bold w-12 h-12 rounded-lg">+</button></div></div><div class="flex gap-4"><button onclick="fecharModal()" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg">Cancelar</button><button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Confirmar</button></div></div></div><script>
+    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="''' + LOGO_URL + '''" class="h-12 rounded-full border-2 border-blue-400" alt="JG MINIS"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span></div><div class="flex gap-4">''' + filter_html + '''<a href="/perfil" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold">Perfil</a><a href="/minhas-reservas" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Minhas Reservas</a>''' + admin_links + '''<a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-2">Catálogo de Miniaturas</h1><p class="text-slate-300 mb-8">Pré-vendas</p><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">''' + items_html + '''</div></div><div id="confirmModal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 shadow-2xl max-w-md w-full p-8"><h2 class="text-2xl font-black text-blue-400 mb-4">Confirmar Reserva</h2><div id="confirmContent" class="text-slate-300 mb-6 space-y-3"></div><div class="mb-4"><label class="block text-slate-300 font-bold mb-2">Quantidade:</label><div class="flex gap-2"><button type="button" onclick="decrementarQtd()" class="bg-red-600 text-white font-bold w-12 h-12 rounded-lg">-</button><input type="number" id="quantidadeInput" value="1" min="1" class="flex-1 bg-slate-700 text-white font-bold text-center rounded-lg border-2 border-blue-600"><button type="button" onclick="incrementarQtd()" class="bg-green-600 text-white font-bold w-12 h-12 rounded-lg">+</button></div></div><div class="flex gap-4"><button onclick="fecharModal()" class="flex-1 bg-slate-700 text-white font-bold py-2 rounded-lg">Cancelar</button><button onclick="confirmarReserva()" class="flex-1 bg-gradient-to-r from-blue-600 to-red-600 text-white font-bold py-2 rounded-lg">Confirmar</button></div></div></div><script>
 let reservaAtual = null;
 let maxQtd = 1;
 
@@ -332,7 +643,7 @@ def reservar():
     if not miniatura_id or not quantidade or quantidade <= 0:
         return {'success': False, 'error': 'Dados inválidos.'}, 400
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     try:
         c.execute('SELECT stock, max_reservations_per_user, price, name FROM miniaturas WHERE id = ?', (miniatura_id,))
@@ -362,70 +673,47 @@ def reservar():
         reserva_id = c.lastrowid
         conn.commit()
         
-        # Enviar email de confirmação
+        # Email
         total = quantidade * preco
         corpo_email = f'''
-        <html>
-            <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
-                <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; padding: 30px; border-left: 5px solid #3b82f6;">
-                    <h1 style="color: #1e40af; text-align: center; margin-bottom: 30px;">🎉 Reserva Confirmada!</h1>
-                    
-                    <div style="background-color: #f0f9ff; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
-                        <p style="margin: 0; color: #333;"><strong>Olá, {user_name}!</strong></p>
-                        <p style="color: #666; margin-top: 10px;">Sua reserva foi confirmada com sucesso! Aqui estão os detalhes:</p>
-                    </div>
-                    
-                    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
-                        <h3 style="color: #1e40af; margin-top: 0;">📦 Detalhes da Reserva:</h3>
-                        <table style="width: 100%; border-collapse: collapse;">
-                            <tr style="border-bottom: 1px solid #e0e0e0;">
-                                <td style="padding: 10px 0; color: #666;"><strong>ID da Reserva:</strong></td>
-                                <td style="padding: 10px 0; color: #333; text-align: right;">{reserva_id}</td>
-                            </tr>
-                            <tr style="border-bottom: 1px solid #e0e0e0;">
-                                <td style="padding: 10px 0; color: #666;"><strong>Miniatura:</strong></td>
-                                <td style="padding: 10px 0; color: #333; text-align: right;">{nome_miniatura}</td>
-                            </tr>
-                            <tr style="border-bottom: 1px solid #e0e0e0;">
-                                <td style="padding: 10px 0; color: #666;"><strong>Quantidade:</strong></td>
-                                <td style="padding: 10px 0; color: #333; text-align: right;">{quantidade}</td>
-                            </tr>
-                            <tr style="border-bottom: 1px solid #e0e0e0;">
-                                <td style="padding: 10px 0; color: #666;"><strong>Preço Unitário:</strong></td>
-                                <td style="padding: 10px 0; color: #333; text-align: right;">R$ {preco:.2f}</td>
-                            </tr>
-                            <tr style="background-color: #f0f9ff;">
-                                <td style="padding: 15px 0; color: #1e40af;"><strong style="font-size: 16px;">Total:</strong></td>
-                                <td style="padding: 15px 0; color: #1e40af; text-align: right; font-size: 18px;"><strong>R$ {total:.2f}</strong></td>
-                            </tr>
-                        </table>
-                    </div>
-                    
-                    <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                        <p style="margin: 0; color: #92400e;"><strong>⏱️ Próximas Etapas:</strong></p>
-                        <p style="margin: 10px 0 0 0; color: #92400e; font-size: 14px;">Nossa equipe entrará em contato em breve com informações sobre o pagamento e entrega.</p>
-                    </div>
-                    
-                    <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center;">
-                        <p style="margin: 0; color: #666; font-size: 14px;">Dúvidas? Entre em contato conosco via WhatsApp</p>
-                        <a href="https://wa.me/{WHATSAPP_NUMERO}" style="display: inline-block; margin-top: 10px; padding: 10px 20px; background-color: #25d366; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">💬 Fale Conosco no WhatsApp</a>
-                    </div>
-                    
-                    <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0;">
-                        <p style="color: #999; font-size: 12px; margin: 0;">JG MINIS - Pré-vendas de Miniaturas</p>
-                        <p style="color: #999; font-size: 12px; margin: 5px 0 0 0;">Obrigado por sua confiança!</p>
-                    </div>
+        <html><body style="font-family: Arial; background: #f4f4f4; padding: 20px;">
+            <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; padding: 30px; border-left: 5px solid #3b82f6;">
+                <h1 style="color: #1e40af; text-align: center;">🎉 Reserva Confirmada!</h1>
+                <div style="background: #f0f9ff; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                    <p style="margin: 0; color: #333;"><strong>Olá, {user_name}!</strong></p>
+                    <p style="color: #666; margin-top: 10px;">Sua reserva foi confirmada. Detalhes:</p>
                 </div>
-            </body>
-        </html>
-        '''
+                <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+                    <h3 style="color: #1e40af;">📦 Detalhes:</h3>
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <tr style="border-bottom: 1px solid #e0e0e0;"><td style="padding: 10px 0; color: #666;"><strong>ID:</strong></td><td style="padding: 10px 0; text-align: right;">{reserva_id}</td></tr>
+                        <tr style="border-bottom: 1px solid #e0e0e0;"><td style="padding: 10px 0; color: #666;"><strong>Miniatura:</strong></td><td style="padding: 10px 0; text-align: right;">{nome_miniatura}</td></tr>
+                        <tr style="border-bottom: 1px solid #e0e0e0;"><td style="padding: 10px 0; color: #666;"><strong>Quantidade:</strong></td><td style="padding: 10px 0; text-align: right;">{quantidade}</td></tr>
+                        <tr style="border-bottom: 1px solid #e0e0e0;"><td style="padding: 10px 0; color: #666;"><strong>Preço Unitário:</strong></td><td style="padding: 10px 0; text-align: right;">R$ {preco:.2f}</td></tr>
+                        <tr style="background: #f0f9ff;"><td style="padding: 15px 0; color: #1e40af;"><strong>Total:</strong></td><td style="padding: 15px 0; text-align: right; font-size: 18px; color: #1e40af;"><strong>R$ {total:.2f}</strong></td></tr>
+                    </table>
+                </div>
+                <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+                    <p style="margin: 0; color: #92400e;"><strong>⏱️ Próximos Passos:</strong> Equipe entrará em contato para pagamento/entrega.</p>
+                </div>
+                <div style="background: #f3f4f6; padding: 20px; border-radius: 8px; text-align: center;">
+                    <p style="margin: 0; color: #666;">Dúvidas? WhatsApp</p>
+                    <a href="https://wa.me/{WHATSAPP_NUMERO}" style="display: inline-block; margin-top: 10px; padding: 10px 20px; background: #25d366; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">💬 Fale Conosco</a>
+                </div>
+                <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0;">
+                    <p style="color: #999; font-size: 12px;">JG MINIS - Obrigado!</p>
+                </div>
+            </div>
+        </body></html>'''
         
-        enviar_email(user_email, '✅ Sua Reserva foi Confirmada - JG MINIS', corpo_email)
+        enviar_email(user_email, '✅ Reserva Confirmada - JG MINIS', corpo_email)
         
-        # Marcar como confirmação enviada
+        # Marca email enviado
         c = conn.cursor()
         c.execute('UPDATE reservations SET confirmacao_enviada = 1 WHERE id = ?', (reserva_id,))
         conn.commit()
+        
+        create_json_backup()  # Backup após reserva
         
         return {'success': True, 'message': 'Reserva realizada com sucesso!'}
     except Exception as e:
@@ -445,7 +733,7 @@ def add_to_waitlist():
     if not miniatura_id:
         return {'success': False, 'error': 'ID da miniatura inválido.'}, 400
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     try:
         c.execute('SELECT id FROM waitlist WHERE user_id = ? AND miniatura_id = ?', (user_id, miniatura_id))
@@ -455,6 +743,7 @@ def add_to_waitlist():
         c.execute('INSERT INTO waitlist (user_id, miniatura_id, email, request_date) VALUES (?, ?, ?, ?)',
                   (user_id, miniatura_id, user_email, datetime.now().isoformat()))
         conn.commit()
+        create_json_backup()
         return {'success': True, 'message': 'Adicionado à lista de espera!'}
     except Exception as e:
         conn.rollback()
@@ -466,7 +755,7 @@ def add_to_waitlist():
 @login_required
 def minhas_reservas():
     user_id = request.user.get('user_id')
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''SELECT r.id, m.name, m.image_url, r.quantity, r.reservation_date, r.status, m.price, r.confirmacao_enviada
                  FROM reservations r 
@@ -506,7 +795,7 @@ def minhas_reservas():
 </div>
 </div>'''
     
-    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Minhas Reservas - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span><div class="flex gap-4"><a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Catálogo</a><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-8">Minhas Reservas</h1><div class="grid grid-cols-1 gap-6">''' + reservas_html + '''</div></div><script>
+    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Minhas Reservas - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="''' + LOGO_URL + '''" class="h-12 rounded-full border-2 border-blue-400" alt="JG MINIS"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">JG MINIS</span></div><div class="flex gap-4"><a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Catálogo</a><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-8">Minhas Reservas</h1><div class="grid grid-cols-1 gap-6">''' + reservas_html + '''</div></div><script>
 function cancelarReserva(reservaId) {
   if (confirm("Tem certeza que deseja cancelar esta reserva?")) {
     fetch("/cancelar-reserva", {
@@ -540,7 +829,7 @@ def cancelar_reserva():
     if not reserva_id:
         return {'success': False, 'error': 'ID da reserva inválido.'}, 400
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     try:
         c.execute('SELECT miniatura_id, quantity, user_id, status FROM reservations WHERE id = ?', (reserva_id,))
@@ -561,6 +850,7 @@ def cancelar_reserva():
         c.execute('UPDATE miniaturas SET stock = stock + ? WHERE id = ?', (quantity, miniatura_id))
         c.execute('UPDATE reservations SET status = "cancelled" WHERE id = ?', (reserva_id,))
         conn.commit()
+        create_json_backup()
         return {'success': True, 'message': 'Reserva cancelada com sucesso!'}
     except Exception as e:
         conn.rollback()
@@ -572,7 +862,7 @@ def cancelar_reserva():
 @login_required
 def perfil():
     user_id = request.user.get('user_id')
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT name, email, phone FROM users WHERE id = ?', (user_id,))
     user = c.fetchone()
@@ -580,7 +870,7 @@ def perfil():
     
     name, email, phone = user if user else ('', '', '')
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Meu Perfil - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><span class="text-3xl font-black text-blue-400">JG MINIS</span><div class="flex gap-4"><a href="/" class="bg-blue-600 px-4 py-2 rounded text-white">Catálogo</a><a href="/logout" class="bg-red-700 px-4 py-2 rounded text-white">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12 max-w-2xl"><h1 class="text-4xl font-black text-blue-400 mb-8">Meu Perfil</h1><div class="bg-slate-800 rounded-xl border-2 border-blue-600 p-6 mb-6"><h2 class="text-2xl text-blue-300 font-bold mb-4">Informações Pessoais</h2><div class="space-y-3"><p class="text-slate-300"><strong>Nome:</strong> {name}</p><p class="text-slate-300"><strong>Email:</strong> {email}</p><p class="text-slate-300"><strong>Telefone:</strong> {phone}</p></div></div><div class="bg-slate-800 rounded-xl border-2 border-green-600 p-6"><h2 class="text-2xl text-green-400 font-bold mb-4">Alterar Senha</h2><form action="/mudar-senha" method="POST" class="space-y-4"><div><label class="block text-slate-300 font-bold mb-2">Senha Atual:</label><input type="password" name="senha_atual" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600"></div><div><label class="block text-slate-300 font-bold mb-2">Nova Senha:</label><input type="password" name="nova_senha" required minlength="6" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600"></div><div><label class="block text-slate-300 font-bold mb-2">Confirmar Nova Senha:</label><input type="password" name="confirmar_senha" required minlength="6" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600"></div><button type="submit" class="w-full bg-gradient-to-r from-green-600 to-blue-600 text-white font-bold py-2 rounded-lg">Alterar Senha</button></form></div></div></body></html>''')
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Meu Perfil - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="''' + LOGO_URL + '''" class="h-12 rounded-full border-2 border-blue-400" alt="JG MINIS"><span class="text-3xl font-black text-blue-400">JG MINIS</span></div><div class="flex gap-4"><a href="/" class="bg-blue-600 px-4 py-2 rounded text-white">Catálogo</a><a href="/logout" class="bg-red-700 px-4 py-2 rounded text-white">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12 max-w-2xl"><h1 class="text-4xl font-black text-blue-400 mb-8">Meu Perfil</h1><div class="bg-slate-800 rounded-xl border-2 border-blue-600 p-6 mb-6"><h2 class="text-2xl text-blue-300 font-bold mb-4">Informações Pessoais</h2><div class="space-y-3"><p class="text-slate-300"><strong>Nome:</strong> {name}</p><p class="text-slate-300"><strong>Email:</strong> {email}</p><p class="text-slate-300"><strong>Telefone:</strong> {phone}</p></div></div><div class="bg-slate-800 rounded-xl border-2 border-green-600 p-6"><h2 class="text-2xl text-green-400 font-bold mb-4">Alterar Senha</h2><form action="/mudar-senha" method="POST" class="space-y-4"><div><label class="block text-slate-300 font-bold mb-2">Senha Atual:</label><input type="password" name="senha_atual" required class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600"></div><div><label class="block text-slate-300 font-bold mb-2">Nova Senha:</label><input type="password" name="nova_senha" required minlength="6" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600"></div><div><label class="block text-slate-300 font-bold mb-2">Confirmar Nova Senha:</label><input type="password" name="confirmar_senha" required minlength="6" class="w-full px-4 py-2 rounded-lg bg-slate-700 text-white border-2 border-blue-600"></div><button type="submit" class="w-full bg-gradient-to-r from-green-600 to-blue-600 text-white font-bold py-2 rounded-lg">Alterar Senha</button></form></div></div></body></html>''')
 
 @app.route('/mudar-senha', methods=['POST'])
 @login_required
@@ -598,7 +888,7 @@ def mudar_senha():
         flash('A nova senha deve ter pelo menos 6 caracteres.', 'error')
         return redirect(url_for('perfil'))
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT password FROM users WHERE id = ?', (user_id,))
     user_data = c.fetchone()
@@ -611,6 +901,7 @@ def mudar_senha():
     nova_senha_hash = bcrypt.hashpw(nova_senha.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     c.execute('UPDATE users SET password = ? WHERE id = ?', (nova_senha_hash, user_id))
     conn.commit()
+    create_json_backup()
     conn.close()
     
     flash('Senha alterada com sucesso!', 'success')
@@ -620,7 +911,7 @@ def mudar_senha():
 @login_required
 @admin_required
 def admin_panel():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT id, name, stock, price FROM miniaturas')
     miniaturas = c.fetchall()
@@ -629,25 +920,27 @@ def admin_panel():
     miniaturas_html = ""
     for m in miniaturas:
         miniaturas_html += f'''<tr class="border-b border-gray-600 hover:bg-gray-700">
-            <td class="px-4 py-3 text-white">{m[0]}</td>
-            <td class="px-4 py-3 text-white">{m[1]}</td>
-            <td class="px-4 py-3 text-white">{m[2]}</td>
-            <td class="px-4 py-3 text-white">R$ {m[3]:.2f}</td>
+            <td class="px-4 py-3 text-white !important">{m[0]}</td>
+            <td class="px-4 py-3 text-white !important">{m[1]}</td>
+            <td class="px-4 py-3 text-white !important">{m[2]}</td>
+            <td class="px-4 py-3 text-white !important">R$ {m[3]:.2f}</td>
             <td class="px-4 py-3 flex gap-2">
                 <a href="/admin/edit-miniatura/{m[0]}" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">Editar</a>
                 <button onclick="deleteMiniatura({m[0]})" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm">Excluir</button>
             </td>
         </tr>'''
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-900 min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="{LOGO_URL}" class="h-12" alt="JG MINIS"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">Admin</span></div><div class="flex gap-4"><a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Catálogo</a><a href="/usuarios" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Usuários</a><a href="/relatorio-reservas" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold">📊 Relatório</a><a href="/lista-espera" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">Lista Espera</a><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-8">Painel Admin</h1><div class="mb-8"><a href="/admin/add-miniatura" class="bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg font-semibold">+ Adicionar Miniatura</a></div><div class="bg-gray-800 rounded-xl border-2 border-blue-600 overflow-hidden"><table class="min-w-full"><thead class="bg-gray-700"><tr><th class="px-4 py-3 text-white text-left">ID</th><th class="px-4 py-3 text-white text-left">Nome</th><th class="px-4 py-3 text-white text-left">Estoque</th><th class="px-4 py-3 text-white text-left">Preço</th><th class="px-4 py-3 text-white text-left">Ações</th></tr></thead><tbody>{miniaturas_html}</tbody></table></div></div><script>
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><style>td, th {{ color: white !important; }}</style></head><body class="bg-gray-900 min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="''' + LOGO_URL + '''" class="h-12 rounded-full border-2 border-blue-400" alt="JG MINIS"><span class="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500">Admin</span></div><div class="flex gap-4"><a href="/" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold">Catálogo</a><a href="/usuarios" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg font-semibold">Usuários</a><a href="/relatorio-reservas" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-semibold">📊 Relatório</a><a href="/lista-espera" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">Lista Espera</a><a href="/logout" class="bg-red-700 hover:bg-red-800 text-white px-4 py-2 rounded-lg font-semibold">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-red-500 mb-8">Painel Admin</h1><div class="mb-8 flex flex-wrap gap-4"><a href="/admin/add-miniatura" class="bg-green-600 hover:bg-green-700 text-white px-5 py-2 rounded-lg font-semibold">+ Adicionar Miniatura</a><a href="/export-usuarios" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold">📊 Export Usuários (Excel)</a><a href="/export-reservas" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2 rounded-lg font-semibold">📊 Export Reservas (Excel)</a></div><div class="bg-gray-800 rounded-xl border-2 border-blue-600 overflow-hidden"><table class="min-w-full"><thead class="bg-gray-700"><tr><th class="px-4 py-3 text-white !important text-left">ID</th><th class="px-4 py-3 text-white !important text-left">Nome</th><th class="px-4 py-3 text-white !important text-left">Estoque</th><th class="px-4 py-3 text-white !important text-left">Preço</th><th class="px-4 py-3 text-white !important text-left">Ações</th></tr></thead><tbody>{miniaturas_html}</tbody></table></div></div><script>
 function deleteMiniatura(id) {{
-  if (confirm("Excluir esta miniatura?")) {{
+  if (confirm("Tem certeza que deseja excluir esta miniatura?")) {{
     fetch("/admin/delete-miniatura/" + id, {{method: "POST", headers: {{"Content-Type": "application/json"}}}})
     .then(r => r.json())
     .then(data => {{
       if (data.success) {{
-        alert("Excluída com sucesso!");
+        alert("Miniatura excluída com sucesso!");
         location.reload();
+      }} else {{
+        alert("ERRO: " + data.error);
       }}
     }});
   }}
@@ -667,12 +960,13 @@ def add_miniatura():
         observations = request.form['observations']
         max_reservations_per_user = int(request.form['max_reservations_per_user'])
         
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         c = conn.cursor()
         try:
-            c.execute("INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            c.execute("INSERT INTO miniaturas (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
                       (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user))
             conn.commit()
+            create_json_backup()  # Backup após adicionar miniatura
             flash('Miniatura adicionada!', 'success')
             return redirect(url_for('admin_panel'))
         except Exception as e:
@@ -680,13 +974,13 @@ def add_miniatura():
         finally:
             conn.close()
     
-    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Adicionar - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen flex items-center justify-center"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 p-8 max-w-lg w-full"><h2 class="text-3xl font-black text-blue-400 mb-6">Adicionar Miniatura</h2>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="text-{{ 'red' if category == 'error' else 'green' }}-400 mb-4">{{ message }}</div>{% endfor %}{% endif %}{% endwith %}<form method="POST" class="space-y-3"><input type="text" name="name" placeholder="Nome" required class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="url" name="image_url" placeholder="URL da Imagem" required class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="date" name="arrival_date" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="number" name="stock" placeholder="Estoque" required min="0" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="number" name="price" placeholder="Preço" required step="0.01" min="0" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><textarea name="observations" placeholder="Observações" rows="2" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"></textarea><input type="number" name="max_reservations_per_user" placeholder="Máx Reservas" required min="1" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><div class="flex gap-3"><a href="/admin" class="flex-1 text-center bg-slate-700 text-white py-2 rounded-lg">Cancelar</a><button type="submit" class="flex-1 bg-green-600 text-white font-bold py-2 rounded-lg">Adicionar</button></div></form></div></body></html>''')
+    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Adicionar - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen flex items-center justify-center"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 p-8 max-w-lg w-full"><div class="flex justify-center mb-6"><img src="''' + LOGO_URL + '''" class="h-16 rounded-full border-2 border-blue-400" alt="JG MINIS"></div><h2 class="text-3xl font-black text-blue-400 mb-6">Adicionar Miniatura</h2>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="text-{{ 'red' if category == 'error' else 'green' }}-400 mb-4">{{ message }}</div>{% endfor %}{% endif %}{% endwith %}<form method="POST" class="space-y-3"><input type="text" name="name" placeholder="Nome" required class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="url" name="image_url" placeholder="URL da Imagem" required class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="date" name="arrival_date" placeholder="Previsão de Chegada" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="number" name="stock" placeholder="Estoque" required min="0" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="number" name="price" placeholder="Preço" required step="0.01" min="0" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><textarea name="observations" placeholder="Observações" rows="2" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"></textarea><input type="number" name="max_reservations_per_user" placeholder="Máx Reservas por Usuário" required min="1" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><div class="flex gap-3"><a href="/admin" class="flex-1 text-center bg-slate-700 text-white py-2 rounded-lg">Cancelar</a><button type="submit" class="flex-1 bg-green-600 text-white font-bold py-2 rounded-lg">Adicionar</button></div></form></div></body></html>''')
 
 @app.route('/admin/edit-miniatura/<int:miniatura_id>', methods=['GET', 'POST'])
 @login_required
 @admin_required
 def edit_miniatura(miniatura_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     
     if request.method == 'POST':
@@ -702,6 +996,7 @@ def edit_miniatura(miniatura_id):
             c.execute("UPDATE miniaturas SET image_url=?, name=?, arrival_date=?, stock=?, price=?, observations=?, max_reservations_per_user=? WHERE id=?",
                       (image_url, name, arrival_date, stock, price, observations, max_reservations_per_user, miniatura_id))
             conn.commit()
+            create_json_backup()  # Backup após editar miniatura
             flash('Atualizado com sucesso!', 'success')
             return redirect(url_for('admin_panel'))
         except Exception as e:
@@ -717,17 +1012,18 @@ def edit_miniatura(miniatura_id):
         flash('Não encontrada!', 'error')
         return redirect(url_for('admin_panel'))
     
-    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Editar - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen flex items-center justify-center"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 p-8 max-w-lg w-full"><h2 class="text-3xl font-black text-blue-400 mb-6">Editar Miniatura</h2>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="text-{{ 'red' if category == 'error' else 'green' }}-400 mb-4">{{ message }}</div>{% endfor %}{% endif %}{% endwith %}<form method="POST" class="space-y-3"><input type="text" name="name" value="''' + miniatura[1] + '''" required class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="url" name="image_url" value="''' + miniatura[0] + '''" required class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="date" name="arrival_date" value="''' + miniatura[2] + '''" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="number" name="stock" value="''' + str(miniatura[3]) + '''" required min="0" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="number" name="price" value="''' + str(miniatura[4]) + '''" required step="0.01" min="0" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><textarea name="observations" rows="2" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg">''' + miniatura[5] + '''</textarea><input type="number" name="max_reservations_per_user" value="''' + str(miniatura[6]) + '''" required min="1" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><div class="flex gap-3"><a href="/admin" class="flex-1 text-center bg-slate-700 text-white py-2 rounded-lg">Cancelar</a><button type="submit" class="flex-1 bg-green-600 text-white font-bold py-2 rounded-lg">Salvar</button></div></form></div></body></html>''')
+    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Editar - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gradient-to-b from-slate-950 via-blue-950 to-black min-h-screen flex items-center justify-center"><div class="bg-gradient-to-b from-slate-800 to-black rounded-xl border-2 border-red-600 p-8 max-w-lg w-full"><div class="flex justify-center mb-6"><img src="''' + LOGO_URL + '''" class="h-16 rounded-full border-2 border-blue-400" alt="JG MINIS"></div><h2 class="text-3xl font-black text-blue-400 mb-6">Editar Miniatura</h2>{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="text-{{ 'red' if category == 'error' else 'green' }}-400 mb-4">{{ message }}</div>{% endfor %}{% endif %}{% endwith %}<form method="POST" class="space-y-3"><input type="text" name="name" value="''' + miniatura[1] + '''" required class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="url" name="image_url" value="''' + miniatura[0] + '''" required class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="date" name="arrival_date" value="''' + miniatura[2] + '''" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="number" name="stock" value="''' + str(miniatura[3]) + '''" required min="0" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><input type="number" name="price" value="''' + str(miniatura[4]) + '''" required step="0.01" min="0" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><textarea name="observations" rows="2" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg">''' + miniatura[5] + '''</textarea><input type="number" name="max_reservations_per_user" value="''' + str(miniatura[6]) + '''" required min="1" class="w-full px-3 py-2 bg-slate-700 text-white rounded-lg"><div class="flex gap-3"><a href="/admin" class="flex-1 text-center bg-slate-700 text-white py-2 rounded-lg">Cancelar</a><button type="submit" class="flex-1 bg-green-600 text-white font-bold py-2 rounded-lg">Salvar</button></div></form></div></body></html>''')
 
 @app.route('/admin/delete-miniatura/<int:miniatura_id>', methods=['POST'])
 @login_required
 @admin_required
 def delete_miniatura(miniatura_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     try:
         c.execute('DELETE FROM miniaturas WHERE id = ?', (miniatura_id,))
         conn.commit()
+        create_json_backup()  # Backup após deletar miniatura
         return {'success': True}
     except Exception as e:
         conn.rollback()
@@ -739,7 +1035,7 @@ def delete_miniatura(miniatura_id):
 @login_required
 @admin_required
 def usuarios():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('SELECT id, name, email, phone, is_admin FROM users')
     users = c.fetchall()
@@ -749,9 +1045,9 @@ def usuarios():
     for u in users:
         admin_status = "Sim" if u[4] else "Não"
         promote_btn = "" if u[4] else f'<button onclick="promoverAdmin({u[0]})" class="bg-yellow-600 text-white px-3 py-1 rounded text-sm">Promover</button>'
-        users_html += f'<tr class="border-b border-gray-600"><td class="px-4 py-3 text-white">{u[0]}</td><td class="px-4 py-3 text-white">{u[1]}</td><td class="px-4 py-3 text-white">{u[2]}</td><td class="px-4 py-3 text-white">{u[3]}</td><td class="px-4 py-3 text-white">{admin_status}</td><td class="px-4 py-3 flex gap-2">{promote_btn}<a href="/admin/edit-user/{u[0]}" class="bg-blue-600 text-white px-3 py-1 rounded text-sm">Editar</a><button onclick="resetarSenha({u[0]})" class="bg-orange-600 text-white px-3 py-1 rounded text-sm">Reset Senha</button><button onclick="deleteUser({u[0]})" class="bg-red-600 text-white px-3 py-1 rounded text-sm">Excluir</button></td></tr>'
+        users_html += f'<tr class="border-b border-gray-600"><td class="px-4 py-3 text-white !important">{u[0]}</td><td class="px-4 py-3 text-white !important">{u[1]}</td><td class="px-4 py-3 text-white !important">{u[2]}</td><td class="px-4 py-3 text-white !important">{u[3]}</td><td class="px-4 py-3 text-white !important">{admin_status}</td><td class="px-4 py-3 flex gap-2">{promote_btn}<a href="/admin/edit-user/{u[0]}" class="bg-blue-600 text-white px-3 py-1 rounded text-sm">Editar</a><button onclick="resetarSenha({u[0]})" class="bg-orange-600 text-white px-3 py-1 rounded text-sm">Reset Senha</button><button onclick="deleteUser({u[0]})" class="bg-red-600 text-white px-3 py-1 rounded text-sm">Excluir</button></td></tr>'
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Usuários - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-900 min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="{LOGO_URL}" class="h-12" alt="JG MINIS"><span class="text-3xl font-black text-white">Usuários</span></div><div class="flex gap-4"><a href="/admin" class="bg-red-600 text-white px-4 py-2 rounded text-sm">Admin</a><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded text-sm">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-4xl font-black text-white mb-8">Gerenciar Usuários</h1><div class="mb-4"><a href="/admin/add-user" class="bg-green-600 text-white px-4 py-2 rounded">Adicionar</a><a href="/export-usuarios" class="bg-indigo-600 text-white px-4 py-2 rounded ml-2">📊 Excel</a></div><div class="bg-gray-800 rounded-xl border border-blue-600 overflow-x-auto"><table class="w-full"><thead class="bg-gray-700"><tr><th class="px-4 py-2 text-white text-left">ID</th><th class="px-4 py-2 text-white text-left">Nome</th><th class="px-4 py-2 text-white text-left">Email</th><th class="px-4 py-2 text-white text-left">Tel</th><th class="px-4 py-2 text-white text-left">Admin</th><th class="px-4 py-2 text-white text-left">Ações</th></tr></thead><tbody>{users_html}</tbody></table></div></div><script>
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Usuários - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><style>td, th {{ color: white !important; }}</style></head><body class="bg-gray-900 min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="''' + LOGO_URL + '''" class="h-12 rounded-full border-2 border-blue-400" alt="JG MINIS"><span class="text-3xl font-black text-white">Usuários</span></div><div class="flex gap-4"><a href="/admin" class="bg-red-600 text-white px-4 py-2 rounded text-sm">Admin</a><a href="/logout" class="bg-red-700 text-white px-4 py-2 rounded text-sm">Sair</a></div></div></nav><div class="container mx-auto px-4 py-12"><h1 class="text-4xl font-black text-white mb-8">Gerenciar Usuários</h1><div class="mb-4"><a href="/admin/add-user" class="bg-green-600 text-white px-4 py-2 rounded">Adicionar</a></div><div class="bg-gray-800 rounded-xl border border-blue-600 overflow-x-auto"><table class="w-full"><thead class="bg-gray-700"><tr><th class="px-4 py-2 text-white !important text-left">ID</th><th class="px-4 py-2 text-white !important text-left">Nome</th><th class="px-4 py-2 text-white !important text-left">Email</th><th class="px-4 py-2 text-white !important text-left">Tel</th><th class="px-4 py-2 text-white !important text-left">Admin</th><th class="px-4 py-2 text-white !important text-left">Ações</th></tr></thead><tbody>{users_html}</tbody></table></div></div><script>
 function promoverAdmin(id) {{
   if (confirm("Promover este usuário a Admin?")) {{
     fetch("/admin/promote-user/" + id, {{method: "POST", headers: {{"Content-Type": "application/json"}}}})
@@ -760,6 +1056,8 @@ function promoverAdmin(id) {{
       if (data.success) {{
         alert("Promovido com sucesso!");
         location.reload();
+      }} else {{
+        alert("ERRO: " + data.error);
       }}
     }});
   }}
@@ -785,10 +1083,17 @@ function resetarSenha(id) {{
 }}
 
 function deleteUser(id) {{
-  if (confirm("Excluir?")) {{
+  if (confirm("Tem certeza que deseja excluir este usuário? Todas as reservas associadas serão mantidas, mas o usuário não poderá mais acessá-las.")) {{
     fetch("/admin/delete-user/" + id, {{method: "POST", headers: {{"Content-Type": "application/json"}}}})
     .then(r => r.json())
-    .then(data => {{location.reload();}});
+    .then(data => {{
+      if (data.success) {{
+        alert("Usuário excluído com sucesso!");
+        location.reload();
+      }} else {{
+        alert("ERRO: " + data.error);
+      }}
+    }});
   }}
 }}
 </script></body></html>''')
@@ -805,26 +1110,27 @@ def add_user():
         is_admin = 1 if 'is_admin' in request.form else 0
         
         hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        conn = sqlite3.connect(DB_FILE)
+        conn = get_db_connection()
         c = conn.cursor()
         try:
             c.execute("INSERT INTO users (name, email, phone, password, is_admin) VALUES (?, ?, ?, ?, ?)",
                       (name, email, phone, hashed, is_admin))
             conn.commit()
-            flash('Adicionado!', 'success')
+            create_json_backup()  # Backup após adicionar usuário
+            flash('Usuário adicionado!', 'success')
             return redirect(url_for('usuarios'))
-        except:
+        except sqlite3.IntegrityError:
             flash('Email duplicado!', 'error')
         finally:
             conn.close()
     
-    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Adicionar Usuário</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen flex items-center justify-center"><div class="bg-slate-800 p-8 rounded-xl border border-blue-600 max-w-sm w-full"><h2 class="text-2xl text-blue-400 font-bold mb-4">Novo Usuário</h2><form method="POST" class="space-y-3"><input type="text" name="name" placeholder="Nome" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="email" name="email" placeholder="Email" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="text" name="phone" placeholder="Telefone" class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="password" name="password" placeholder="Senha" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><label class="flex items-center"><input type="checkbox" name="is_admin" class="mr-2"><span class="text-slate-300">Admin</span></label><div class="flex gap-2"><a href="/usuarios" class="flex-1 text-center bg-slate-700 text-white py-2 rounded">Voltar</a><button class="flex-1 bg-green-600 text-white font-bold py-2 rounded">Salvar</button></div></form></div></body></html>''')
+    return render_template_string('''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Adicionar Usuário</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen flex items-center justify-center"><div class="bg-slate-800 p-8 rounded-xl border border-blue-600 max-w-sm w-full"><div class="flex justify-center mb-6"><img src="''' + LOGO_URL + '''" class="h-16 rounded-full border-2 border-blue-400" alt="JG MINIS"></div><h2 class="text-2xl text-blue-400 font-bold mb-4">Novo Usuário</h2><form method="POST" class="space-y-3"><input type="text" name="name" placeholder="Nome" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="email" name="email" placeholder="Email" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="text" name="phone" placeholder="Telefone" class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="password" name="password" placeholder="Senha" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><label class="flex items-center"><input type="checkbox" name="is_admin" class="mr-2"><span class="text-slate-300">Admin</span></label><div class="flex gap-2"><a href="/usuarios" class="flex-1 text-center bg-slate-700 text-white py-2 rounded">Voltar</a><button class="flex-1 bg-green-600 text-white font-bold py-2 rounded">Salvar</button></div></form></div></body></html>''')
 
 @app.route('/admin/edit-user/<int:user_id>', methods=['GET', 'POST'])
 @login_required
 @admin_required
 def edit_user(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     
     if request.method == 'POST':
@@ -836,7 +1142,7 @@ def edit_user(user_id):
         c.execute("UPDATE users SET name=?, email=?, phone=?, is_admin=? WHERE id=?",
                   (name, email, phone, is_admin, user_id))
         conn.commit()
-        conn.close()
+        create_json_backup()  # Backup após editar usuário
         flash('Atualizado!', 'success')
         return redirect(url_for('usuarios'))
     
@@ -846,18 +1152,24 @@ def edit_user(user_id):
     
     checked = "checked" if user[3] else ""
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Editar Usuário</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen flex items-center justify-center"><div class="bg-slate-800 p-8 rounded-xl border border-blue-600 max-w-sm w-full"><h2 class="text-2xl text-blue-400 font-bold mb-4">Editar Usuário</h2><form method="POST" class="space-y-3"><input type="text" name="name" value="{user[0]}" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="email" name="email" value="{user[1]}" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="text" name="phone" value="{user[2]}" class="w-full px-3 py-2 bg-slate-700 text-white rounded"><label class="flex items-center"><input type="checkbox" name="is_admin" {checked} class="mr-2"><span class="text-slate-300">Admin</span></label><div class="flex gap-2"><a href="/usuarios" class="flex-1 text-center bg-slate-700 text-white py-2 rounded">Voltar</a><button class="flex-1 bg-blue-600 text-white font-bold py-2 rounded">Salvar</button></div></form></div></body></html>''')
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Editar Usuário</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-slate-900 min-h-screen flex items-center justify-center"><div class="bg-slate-800 p-8 rounded-xl border border-blue-600 max-w-sm w-full"><div class="flex justify-center mb-6"><img src="''' + LOGO_URL + '''" class="h-16 rounded-full border-2 border-blue-400" alt="JG MINIS"></div><h2 class="text-2xl text-blue-400 font-bold mb-4">Editar Usuário</h2><form method="POST" class="space-y-3"><input type="text" name="name" value="{user[0]}" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="email" name="email" value="{user[1]}" required class="w-full px-3 py-2 bg-slate-700 text-white rounded"><input type="text" name="phone" value="{user[2]}" class="w-full px-3 py-2 bg-slate-700 text-white rounded"><label class="flex items-center"><input type="checkbox" name="is_admin" {checked} class="mr-2"><span class="text-slate-300">Admin</span></label><div class="flex gap-2"><a href="/usuarios" class="flex-1 text-center bg-slate-700 text-white py-2 rounded">Voltar</a><button class="flex-1 bg-blue-600 text-white font-bold py-2 rounded">Salvar</button></div></form></div></body></html>''')
 
 @app.route('/admin/promote-user/<int:user_id>', methods=['POST'])
 @login_required
 @admin_required
 def promote_user(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('UPDATE users SET is_admin = 1 WHERE id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-    return {'success': True}
+    try:
+        c.execute('UPDATE users SET is_admin = 1 WHERE id = ?', (user_id,))
+        conn.commit()
+        create_json_backup()  # Backup após promover usuário
+        return {'success': True}
+    except Exception as e:
+        conn.rollback()
+        return {'success': False, 'error': str(e)}, 500
+    finally:
+        conn.close()
 
 @app.route('/admin/change-password/<int:user_id>', methods=['POST'])
 @login_required
@@ -870,46 +1182,55 @@ def change_password(user_id):
         return {'success': False, 'error': 'Senha deve ter no mínimo 6 caracteres'}, 400
     
     hashed = bcrypt.hashpw(nova_senha.encode(), bcrypt.gensalt()).decode()
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('UPDATE users SET password = ? WHERE id = ?', (hashed, user_id))
-    conn.commit()
-    conn.close()
-    return {'success': True}
+    try:
+        c.execute('UPDATE users SET password = ? WHERE id = ?', (hashed, user_id))
+        conn.commit()
+        create_json_backup()  # Backup após mudar senha
+        return {'success': True}
+    except Exception as e:
+        conn.rollback()
+        return {'success': False, 'error': str(e)}, 500
+    finally:
+        conn.close()
 
 @app.route('/admin/delete-user/<int:user_id>', methods=['POST'])
 @login_required
 @admin_required
 def delete_user(user_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('DELETE FROM users WHERE id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-    return {'success': True}
+    try:
+        c.execute('DELETE FROM users WHERE id = ?', (user_id,))
+        conn.commit()
+        create_json_backup()  # Backup após deletar usuário
+        return {'success': True}
+    except Exception as e:
+        conn.rollback()
+        return {'success': False, 'error': str(e)}, 500
+    finally:
+        conn.close()
 
 @app.route('/export-usuarios')
 @login_required
 @admin_required
 def export_usuarios():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, name, email, phone, is_admin FROM users')
-    users = c.fetchall()
-    conn.close()
-    
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Usuários"
-    ws.append(['ID', 'Nome', 'Email', 'Telefone', 'Admin'])
-    
-    for u in users:
-        ws.append([u[0], u[1], u[2], u[3], "Sim" if u[4] else "Não"])
-    
-    file = BytesIO()
-    wb.save(file)
-    file.seek(0)
-    return send_file(file, mimetype='application/vnd.ms-excel', as_attachment=True, download_name='usuarios.xlsx')
+    excel_buffer = export_to_excel_usuarios()
+    if excel_buffer:
+        return send_file(excel_buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name='usuarios.xlsx')
+    flash('Nenhum usuário para exportar ou erro na geração do Excel.', 'error')
+    return redirect(url_for('admin_panel'))
+
+@app.route('/export-reservas')
+@login_required
+@admin_required
+def export_reservas():
+    excel_buffer = export_to_excel_reservas()
+    if excel_buffer:
+        return send_file(excel_buffer, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', as_attachment=True, download_name='reservas.xlsx')
+    flash('Nenhuma reserva para exportar ou erro na geração do Excel.', 'error')
+    return redirect(url_for('admin_panel'))
 
 @app.route('/relatorio-reservas')
 @login_required
@@ -918,7 +1239,7 @@ def relatorio_reservas():
     filtro_miniatura = request.args.get('miniatura', '')
     filtro_usuario = request.args.get('usuario', '')
     
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     
     c.execute('SELECT DISTINCT name FROM miniaturas ORDER BY name')
@@ -953,25 +1274,25 @@ def relatorio_reservas():
     total_valor = 0
     
     if not reservas:
-        reservas_html = '<tr><td colspan="10" class="px-4 py-3 text-center text-white">Nenhuma reserva encontrada</td></tr>'
+        reservas_html = '<tr><td colspan="10" class="px-4 py-3 text-center text-white !important">Nenhuma reserva encontrada</td></tr>'
     else:
         for r in reservas:
             total = r[3] * r[4]
             total_valor += total
             status_color = {'pending': 'yellow', 'confirmed': 'green', 'cancelled': 'red'}.get(r[6], 'gray')
             confirmacao_badge = '✅' if r[9] else '❌'
-            reservas_html += f'<tr class="border-b border-gray-600"><td class="px-4 py-2 text-white">{r[0]}</td><td class="px-4 py-2 text-white">{r[1]}</td><td class="px-4 py-2 text-white">{r[2]}</td><td class="px-4 py-2 text-white">{r[3]}</td><td class="px-4 py-2 text-white">R$ {r[4]:.2f}</td><td class="px-4 py-2 text-white">R$ {total:.2f}</td><td class="px-4 py-2"><span class="bg-{status_color}-600 text-white px-2 py-1 rounded text-sm">{r[6]}</span></td><td class="px-4 py-2 text-white text-center">{confirmacao_badge}</td></tr>'
+            reservas_html += f'<tr class="border-b border-gray-600"><td class="px-4 py-2 text-white !important">{r[0]}</td><td class="px-4 py-2 text-white !important">{r[1]}</td><td class="px-4 py-2 text-white !important">{r[2]}</td><td class="px-4 py-2 text-white !important">{r[3]}</td><td class="px-4 py-2 text-white !important">R$ {r[4]:.2f}</td><td class="px-4 py-2 text-white !important">R$ {total:.2f}</td><td class="px-4 py-2"><span class="bg-{status_color}-600 text-white px-2 py-1 rounded text-sm">{r[6]}</span></td><td class="px-4 py-2 text-white !important text-center">{confirmacao_badge}</td></tr>'
     
     filtro_miniatura_options = "".join([f'<option value="{m}"{" selected" if m == filtro_miniatura else ""}>{m}</option>' for m in miniaturas])
     filtro_usuario_options = "".join([f'<option value="{u}"{" selected" if u == filtro_usuario else ""}>{u}</option>' for u in usuarios])
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Relatório - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-900 min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="{LOGO_URL}" class="h-12" alt="JG MINIS"><span class="text-3xl font-black text-white">Relatório</span></div><a href="/admin" class="text-white">← Voltar</a></div></nav><div class="p-8 max-w-7xl mx-auto"><div class="bg-gray-800 rounded-lg p-6 mb-6 border border-blue-600"><h2 class="text-2xl text-white font-bold mb-4">🔍 Filtros de Pesquisa</h2><form method="GET" class="grid grid-cols-1 md:grid-cols-3 gap-4"><div><label class="block text-white font-bold mb-2">Miniatura:</label><select name="miniatura" class="w-full p-2 rounded bg-gray-700 text-white border border-gray-600"><option value="">Todas as Miniaturas</option>{filtro_miniatura_options}</select></div><div><label class="block text-white font-bold mb-2">Usuário:</label><select name="usuario" class="w-full p-2 rounded bg-gray-700 text-white border border-gray-600"><option value="">Todos os Usuários</option>{filtro_usuario_options}</select></div><div class="flex items-end gap-2"><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-2 rounded">Filtrar</button><button type="button" onclick="location.href='/relatorio-reservas'" class="bg-gray-600 hover:bg-gray-700 text-white font-bold px-6 py-2 rounded">Limpar</button></div></form></div><div class="bg-gray-800 rounded-lg overflow-x-auto border border-blue-600"><table class="w-full"><thead class="bg-gray-700"><tr><th class="px-4 py-2 text-white text-left">ID</th><th class="px-4 py-2 text-white text-left">Usuário</th><th class="px-4 py-2 text-white text-left">Miniatura</th><th class="px-4 py-2 text-white text-left">Qtd</th><th class="px-4 py-2 text-white text-left">Preço Unit.</th><th class="px-4 py-2 text-white text-left">Total</th><th class="px-4 py-2 text-white text-left">Status</th><th class="px-4 py-2 text-white text-left">Email</th></tr></thead><tbody>{reservas_html}</tbody></table></div><div class="bg-gray-800 rounded-lg p-4 mt-6 border border-blue-600"><h3 class="text-xl text-white font-bold">💰 Total em Reservas: R$ {total_valor:.2f}</h3></div></div></body></html>''')
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Relatório - JG MINIS</title><script src="https://cdn.tailwindcss.com"></script><style>td, th {{ color: white !important; }}</style></head><body class="bg-gray-900 min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="''' + LOGO_URL + '''" class="h-12 rounded-full border-2 border-blue-400" alt="JG MINIS"><span class="text-3xl font-black text-white">Relatório</span></div><a href="/admin" class="text-white">← Voltar</a></div></nav><div class="p-8 max-w-7xl mx-auto"><div class="bg-gray-800 rounded-lg p-6 mb-6 border border-blue-600"><h2 class="text-2xl text-white font-bold mb-4">🔍 Filtros de Pesquisa</h2><form method="GET" class="grid grid-cols-1 md:grid-cols-3 gap-4"><div><label class="block text-white font-bold mb-2">Miniatura:</label><select name="miniatura" class="w-full p-2 rounded bg-gray-700 text-white border border-gray-600"><option value="">Todas as Miniaturas</option>{filtro_miniatura_options}</select></div><div><label class="block text-white font-bold mb-2">Usuário:</label><select name="usuario" class="w-full p-2 rounded bg-gray-700 text-white border border-gray-600"><option value="">Todos os Usuários</option>{filtro_usuario_options}</select></div><div class="flex items-end gap-2"><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-2 rounded">Filtrar</button><button type="button" onclick="location.href='/relatorio-reservas'" class="bg-gray-600 hover:bg-gray-700 text-white font-bold px-6 py-2 rounded">Limpar</button></div></form></div><div class="bg-gray-800 rounded-lg overflow-x-auto border border-blue-600"><table class="w-full"><thead class="bg-gray-700"><tr><th class="px-4 py-2 text-white !important text-left">ID</th><th class="px-4 py-2 text-white !important text-left">Usuário</th><th class="px-4 py-2 text-white !important text-left">Miniatura</th><th class="px-4 py-2 text-white !important text-left">Qtd</th><th class="px-4 py-2 text-white !important text-left">Preço Unit.</th><th class="px-4 py-2 text-white !important text-left">Total</th><th class="px-4 py-2 text-white !important text-left">Status</th><th class="px-4 py-2 text-white !important text-left">Email</th></tr></thead><tbody>{reservas_html}</tbody></table></div><div class="bg-gray-800 rounded-lg p-4 mt-6 border border-blue-600"><h3 class="text-xl text-white font-bold">💰 Total em Reservas: R$ {total_valor:.2f}</h3></div></div></body></html>''')
 
 @app.route('/lista-espera')
 @login_required
 @admin_required
 def lista_espera():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''SELECT wl.id, u.name, u.email, m.name, wl.notification_sent 
                  FROM waitlist wl 
@@ -983,9 +1304,9 @@ def lista_espera():
     html = ""
     for w in waitlist:
         status = "✓ Enviada" if w[4] else "⏳ Pendente"
-        html += f'<tr class="border-b border-gray-600"><td class="px-4 py-2 text-white">{w[0]}</td><td class="px-4 py-2 text-white">{w[1]}</td><td class="px-4 py-2 text-white">{w[2]}</td><td class="px-4 py-2 text-white">{w[3]}</td><td class="px-4 py-2"><span class="text-white">{status}</span></td><td class="px-4 py-2"><button onclick="marcarNotificado({w[0]})" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">Marcar</button></td></tr>'
+        html += f'<tr class="border-b border-gray-600"><td class="px-4 py-2 text-white !important">{w[0]}</td><td class="px-4 py-2 text-white !important">{w[1]}</td><td class="px-4 py-2 text-white !important">{w[2]}</td><td class="px-4 py-2 text-white !important">{w[3]}</td><td class="px-4 py-2"><span class="text-white !important">{status}</span></td><td class="px-4 py-2"><button onclick="marcarNotificado({w[0]})" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">Marcar</button></td></tr>'
     
-    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Lista de Espera</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-900 min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="{LOGO_URL}" class="h-12" alt="JG MINIS"><span class="text-3xl font-black text-white">Lista de Espera</span></div><a href="/admin" class="text-white">← Voltar</a></div></nav><div class="p-8"><h1 class="text-3xl text-white font-bold mb-6">Usuários na Lista de Espera</h1><div class="bg-gray-800 rounded-lg border border-blue-600 overflow-x-auto"><table class="w-full"><thead class="bg-gray-700"><tr><th class="px-4 py-2 text-white text-left">ID</th><th class="px-4 py-2 text-white text-left">Usuário</th><th class="px-4 py-2 text-white text-left">Email</th><th class="px-4 py-2 text-white text-left">Miniatura</th><th class="px-4 py-2 text-white text-left">Status</th><th class="px-4 py-2 text-white text-left">Ação</th></tr></thead><tbody>{html}</tbody></table></div></div><script>
+    return render_template_string(f'''<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Lista de Espera</title><script src="https://cdn.tailwindcss.com"></script><style>td, th {{ color: white !important; }}</style></head><body class="bg-gray-900 min-h-screen"><nav class="bg-gradient-to-r from-blue-900 to-black shadow-2xl border-b-4 border-red-600 sticky top-0 z-50"><div class="container mx-auto px-4 py-4 flex justify-between items-center"><div class="flex items-center gap-3"><img src="''' + LOGO_URL + '''" class="h-12 rounded-full border-2 border-blue-400" alt="JG MINIS"><span class="text-3xl font-black text-white">Lista de Espera</span></div><a href="/admin" class="text-white">← Voltar</a></div></nav><div class="p-8"><h1 class="text-3xl text-white font-bold mb-6">Usuários na Lista de Espera</h1><div class="bg-gray-800 rounded-lg border border-blue-600 overflow-x-auto"><table class="w-full"><thead class="bg-gray-700"><tr><th class="px-4 py-2 text-white !important text-left">ID</th><th class="px-4 py-2 text-white !important text-left">Usuário</th><th class="px-4 py-2 text-white !important text-left">Email</th><th class="px-4 py-2 text-white !important text-left">Miniatura</th><th class="px-4 py-2 text-white !important text-left">Status</th><th class="px-4 py-2 text-white !important text-left">Ação</th></tr></thead><tbody>{html}</tbody></table></div></div><script>
 function marcarNotificado(id) {{
   fetch("/admin/mark-notified/" + id, {{method: "POST"}}).then(() => location.reload());
 }}
@@ -995,14 +1316,25 @@ function marcarNotificado(id) {{
 @login_required
 @admin_required
 def mark_notified(entry_id):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('UPDATE waitlist SET notification_sent = 1 WHERE id = ?', (entry_id,))
-    conn.commit()
-    conn.close()
-    return {'success': True}
+    try:
+        c.execute('UPDATE waitlist SET notification_sent = 1 WHERE id = ?', (entry_id,))
+        conn.commit()
+        create_json_backup()  # Backup após marcar notificado
+        return {'success': True}
+    except Exception as e:
+        conn.rollback()
+        return {'success': False, 'error': str(e)}, 500
+    finally:
+        conn.close()
 
+# Inicialização do DB e carregamento de dados
+# Ordem: init_db -> restore_backup -> load_initial_data -> load_miniaturas_from_sheets
+# Isso garante que o DB é criado, depois restaurado, e só então dados iniciais/sheets são carregados
+# para evitar sobrescrever dados restaurados.
 init_db()
+restore_backup()
 load_initial_data()
 load_miniaturas_from_sheets()
 
