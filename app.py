@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 bcrypt = Bcrypt(app)
 
-# Configuração gspread com auth moderna (google-auth, sem oauth2client)
+# Configuração gspread com auth moderna (google-auth)
 gc = None
 if GOOGLE_SHEETS_CREDENTIALS:
     try:
@@ -45,18 +45,18 @@ def is_valid_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# Inicialização do banco SQLite (tabelas expandidas)
+# Inicialização do banco SQLite
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    # Tabela users (adicionado data_cadastro)
+    # Tabela users
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   email TEXT UNIQUE NOT NULL,
                   password TEXT NOT NULL,
                   role TEXT DEFAULT 'user',
                   data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # Tabela reservations (adicionado approved_by, denied_reason)
+    # Tabela reservations
     c.execute('''CREATE TABLE IF NOT EXISTS reservations
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER NOT NULL,
@@ -73,12 +73,50 @@ def init_db():
     if not c.fetchone():
         hashed_password = bcrypt.generate_password_hash('admin123').decode('utf-8')
         c.execute("INSERT INTO users (email, password, role) VALUES ('admin@jgminis.com.br', ?, 'admin')", (hashed_password,))
-        conn.commit()
         logger.info("Usuário admin criado no DB")
     conn.commit()
     conn.close()
 
 init_db()
+
+# Função para carregar thumbnails da planilha "BASE DE DADOS JG"
+def load_thumbnails():
+    thumbnails = []
+    if gc:
+        try:
+            sheet = gc.open("BASE DE DADOS JG").sheet1  # Nome da planilha
+            records = sheet.get_all_records()  # Pega todas as linhas como dict
+            for record in records:  # Pega todos os itens da planilha
+                # Mapeamento das colunas da planilha para o formato do app
+                service = record.get('NOME DA MINIATURA', 'Miniatura Desconhecida')
+                
+                # Combina MARCA/FABRICANTE e OBSERVAÇÕES para a descrição
+                marca_fabricante = record.get('MARCA/FABRICANTE', '').strip()
+                observacoes = record.get('OBSERVAÇÕES', '').strip()
+                description_parts = [part for part in [marca_fabricante, observacoes] if part]
+                description = " - ".join(description_parts) if description_parts else 'Descrição não disponível'
+                
+                thumbnail_url = record.get('IMAGEM', LOGO_URL)  # URL da imagem
+                
+                # Formata o preço
+                price_raw = str(record.get('VALOR', '')).strip()
+                price = price_raw.replace('R$', '').replace(',', '.').strip() if price_raw else 'Consultar'
+                
+                thumbnails.append({
+                    'service': service,
+                    'description': description,
+                    'thumbnail_url': thumbnail_url,
+                    'price': price
+                })
+            logger.info(f"Carregados {len(thumbnails)} thumbnails da planilha BASE DE DADOS JG")
+        except Exception as e:
+            logger.error(f"Erro ao carregar planilha: {e}")
+            # Fallback se houver erro no Sheets
+            thumbnails = [{'service': 'Fallback', 'description': 'Serviço em manutenção', 'thumbnail_url': LOGO_URL, 'price': '0,00'}]
+    else:
+        # Fallback se GOOGLE_SHEETS_CREDENTIALS não estiver configurado
+        thumbnails = [{'service': 'Sem Integração', 'description': 'Configure Sheets para mais detalhes', 'thumbnail_url': LOGO_URL, 'price': '0,00'}]
+    return thumbnails
 
 # --- Templates HTML Inline (com CSS responsivo) ---
 
@@ -92,13 +130,36 @@ INDEX_HTML = '''
     <style>
         body { font-family: 'Arial', sans-serif; margin: 0; padding: 20px; background: #f8f9fa; color: #333; }
         header { text-align: center; padding: 20px; background: #007bff; color: white; }
-        img.logo { width: 150px; height: auto; margin: 10px; }
-        .thumbnails { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; padding: 20px; }
-        .thumbnail { background: white; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); padding: 15px; text-align: center; transition: transform 0.2s; }
+        img.logo { max-width: 150px; height: auto; margin: 10px; }
+        .thumbnails { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
+            gap: 20px; 
+            padding: 20px; 
+            max-width: 1200px; /* Limita largura para PC */
+            margin: 0 auto; /* Centraliza */
+        }
+        .thumbnail { 
+            background: white; 
+            border-radius: 10px; 
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1); 
+            padding: 15px; 
+            text-align: center; 
+            transition: transform 0.2s; 
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
         .thumbnail:hover { transform: scale(1.05); }
-        .thumbnail img { width: 100%; height: 150px; object-fit: cover; border-radius: 8px; }
+        .thumbnail img { 
+            width: 100%; 
+            height: 150px; 
+            object-fit: cover; 
+            border-radius: 8px; 
+            margin-bottom: 10px;
+        }
         .thumbnail h3 { margin: 10px 0; color: #007bff; }
-        .thumbnail p { margin: 5px 0; }
+        .thumbnail p { margin: 5px 0; flex-grow: 1; }
         nav { text-align: center; padding: 10px; background: #e9ecef; }
         nav a { margin: 0 15px; color: #007bff; text-decoration: none; font-weight: bold; }
         nav a:hover { text-decoration: underline; }
@@ -106,7 +167,10 @@ INDEX_HTML = '''
         .flash-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .flash-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         footer { text-align: center; padding: 10px; background: #343a40; color: white; margin-top: 40px; }
-        @media (max-width: 600px) { .thumbnails { grid-template-columns: 1fr; } }
+        @media (max-width: 600px) { 
+            .thumbnails { grid-template-columns: 1fr; padding: 10px; } 
+            body { padding: 0; }
+        }
     </style>
 </head>
 <body>
@@ -277,9 +341,9 @@ RESERVAR_HTML = '''
         </div>
         {% else %}
         <form method="POST">
-            <label for="service">Serviço:</label>
+            <label for="service">Miniatura:</label>
             <select name="service" id="service" required>
-                <option value="">Selecione um serviço</option>
+                <option value="">Selecione uma miniatura</option>
                 {% for thumb in thumbnails %}
                 <option value="{{ thumb.service }}">{{ thumb.service }} - R$ {{ thumb.price }}</option>
                 {% endfor %}
@@ -289,7 +353,7 @@ RESERVAR_HTML = '''
             <button type="submit">Confirmar Reserva</button>
         </form>
         <div class="services-list">
-            <h3>Serviços Disponíveis:</h3>
+            <h3>Miniaturas Disponíveis:</h3>
             {% for thumb in thumbnails %}
             <div class="service-option">
                 <strong>{{ thumb.service }}</strong> - {{ thumb.description }} - R$ {{ thumb.price }}
@@ -342,7 +406,7 @@ PROFILE_HTML = '''
         <ul>
             {% for res in reservations %}
             <li class="{{ 'approved' if res.status == 'approved' else 'denied' if res.status == 'denied' else 'pending' }}">
-                <strong>Serviço:</strong> {{ res.service }} | <strong>Data:</strong> {{ res.date }} | <strong>Status:</strong> {{ res.status.title() }}
+                <strong>Miniatura:</strong> {{ res.service }} | <strong>Data:</strong> {{ res.date }} | <strong>Status:</strong> {{ res.status.title() }}
                 {% if res.denied_reason %} | <em>Motivo rejeitado: {{ res.denied_reason }}</em>{% endif %}
             </li>
             {% endfor %}
@@ -447,24 +511,7 @@ ADMIN_HTML = '''
 
 @app.route('/', methods=['GET'])
 def index():
-    thumbnails = []
-    if gc:
-        try:
-            sheet = gc.open("JG Minis Sheet").sheet1
-            records = sheet.get_all_records()
-            for record in records[:6]: # Limita a 6 thumbnails para a home
-                thumbnails.append({
-                    'service': record.get('service', 'Serviço Desconhecido'),
-                    'description': record.get('description', 'Descrição não disponível'),
-                    'thumbnail_url': record.get('thumbnail_url', LOGO_URL),
-                    'price': record.get('price', 'Consultar')
-                })
-            logger.info(f"Carregados {len(thumbnails)} thumbnails do Sheets")
-        except Exception as e:
-            logger.error(f"Erro ao carregar Sheets: {e}")
-            thumbnails = [{'service': 'Fallback', 'description': 'Serviço em manutenção', 'thumbnail_url': LOGO_URL, 'price': 'R$ 0'}]
-    else:
-        thumbnails = [{'service': 'Sem Integração', 'description': 'Configure Sheets para mais detalhes', 'thumbnail_url': LOGO_URL, 'price': 'Consultar'}]
+    thumbnails = load_thumbnails()
     return render_template_string(INDEX_HTML, logo_url=LOGO_URL, thumbnails=thumbnails)
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -526,20 +573,7 @@ def reservar():
     if 'user_id' not in session:
         flash('Faça login para reservar.', 'error')
         return redirect(url_for('login'))
-    thumbnails = []
-    if gc:
-        try:
-            sheet = gc.open("JG Minis Sheet").sheet1
-            records = sheet.get_all_records()
-            for record in records:
-                thumbnails.append({
-                    'service': record.get('service', ''),
-                    'description': record.get('description', ''),
-                    'thumbnail_url': record.get('thumbnail_url', LOGO_URL),
-                    'price': record.get('price', '')
-                })
-        except Exception as e:
-            logger.error(f"Erro thumbnails reservar: {e}")
+    thumbnails = load_thumbnails()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
     if request.method == 'POST':
         service = request.form['service']
@@ -556,7 +590,6 @@ def reservar():
         conn.close()
         logger.info(f"Reserva criada ID {res_id} por user {session['user_id']}")
         flash('Reserva realizada! Aguarde aprovação.', 'success')
-        # send_email(session['email'], 'Reserva Recebida', f'Sua reserva para {service} em {selected_date} foi enviada para aprovação.')
         return redirect(url_for('profile'))
     return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
 
@@ -612,17 +645,15 @@ def admin():
             conn.commit()
             flash('Reserva aprovada.', 'success')
             logger.info(f"Admin {session['email']} aprovou reserva {res_id}")
-            # Envia email ao user (comentado)
         elif action == 'deny' and res_id:
             reason = request.form.get('reason', 'Motivo não especificado')
             c.execute("UPDATE reservations SET status = 'denied', denied_reason = ? WHERE id = ?", (reason, res_id))
             conn.commit()
             flash('Reserva rejeitada.', 'success')
             logger.info(f"Admin {session['email']} rejeitou reserva {res_id}: {reason}")
-            # Envia email ao user (comentado)
-        elif 'demote_' in request.args: # Demote user (admin only)
+        elif 'demote_' in request.args:
             user_id_to_demote = int(request.args['demote_'][7:])
-            if user_id_to_demote != session['user_id']: # Cannot demote self
+            if user_id_to_demote != session['user_id']:
                 c.execute("UPDATE users SET role = 'user' WHERE id = ?", (user_id_to_demote,))
                 conn.commit()
                 flash(f'Usuário rebaixado para user.', 'success')
