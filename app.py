@@ -9,22 +9,23 @@ import gspread
 from google.oauth2.service_account import Credentials
 import re
 
-# Configurações de logging para Railway (debug em produção)
+# --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configurações de ambiente (com fallbacks para desenvolvimento local)
-LOGO_URL = os.environ.get('LOGO_URL', 'https://via.placeholder.com/150x50?text=JG+MINIS+Logo')
-GOOGLE_SHEETS_CREDENTIALS = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')  # JSON string minificado
+# --- Environment Variables and Configuration ---
+# Stable LOGO_URL from Imgur to avoid DNS issues with placeholder services
+LOGO_URL = os.environ.get('LOGO_URL', 'https://i.imgur.com/5zQ8Z0l.png') # Default: Blue 150x50 with "JG MINIS" text
+GOOGLE_SHEETS_CREDENTIALS = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'jgminis_v4_secret_2025_dev_key_fallback')
-DATABASE = os.environ.get('DATABASE', '/tmp/jgminis.db')  # SQLite path para Railway/Heroku
+DATABASE = os.environ.get('DATABASE', '/tmp/jgminis.db') # Use /tmp for Railway ephemeral storage
 
-# Inicializa Flask e Bcrypt
+# --- Flask App Initialization ---
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 bcrypt = Bcrypt(app)
 
-# Configuração gspread com auth moderna (google-auth, sem oauth2client)
+# --- gspread (Google Sheets) Initialization ---
 gc = None
 if GOOGLE_SHEETS_CREDENTIALS:
     try:
@@ -40,35 +41,36 @@ else:
     logger.warning("GOOGLE_SHEETS_CREDENTIALS não definida - usando fallback sem Sheets")
     gc = None
 
-# Função para validar email com regex
+# --- Utility Functions ---
 def is_valid_email(email):
+    """Validates email format."""
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# Inicialização do banco SQLite (tabelas expandidas)
 def init_db():
+    """Initializes the SQLite database and creates tables if they don't exist.
+    Also creates a default admin user if not present."""
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    # Tabela users (adicionado data_cadastro)
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   email TEXT UNIQUE NOT NULL,
                   password TEXT NOT NULL,
                   role TEXT DEFAULT 'user',
                   data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # Tabela reservations (adicionado approved_by, denied_reason)
     c.execute('''CREATE TABLE IF NOT EXISTS reservations
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER NOT NULL,
                   service TEXT NOT NULL,
-                  date TEXT NOT NULL,  -- Formato YYYY-MM-DD
+                  date TEXT NOT NULL,
                   status TEXT DEFAULT 'pending',
-                  approved_by INTEGER,  -- ID admin que aprovou
+                  approved_by INTEGER,
                   denied_reason TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users (id),
                   FOREIGN KEY (approved_by) REFERENCES users (id))''')
-    # Admin user default
+    
+    # Create default admin user if not exists
     c.execute("SELECT id FROM users WHERE email = 'admin@jgminis.com.br'")
     if not c.fetchone():
         hashed_password = bcrypt.generate_password_hash('admin123').decode('utf-8')
@@ -77,51 +79,57 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Initialize database on app start
 init_db()
 
-# Função para carregar thumbnails da planilha "BASE DE DADOS JG" (mapeamento custom)
 def load_thumbnails():
+    """Loads thumbnail data from the 'BASE DE DADOS JG' Google Sheet."""
     thumbnails = []
     if gc:
         try:
-            sheet = gc.open("BASE DE DADOS JG").sheet1  # Nome da planilha
-            records = sheet.get_all_records()  # Pega todas as linhas como dict
+            # Assumes sheet name is "BASE DE DADOS JG" and data is in the first sheet (sheet1)
+            # If using sheet ID, change to gc.open_by_key("YOUR_SHEET_ID").sheet1
+            sheet = gc.open("BASE DE DADOS JG").sheet1
+            records = sheet.get_all_records() # Retrieves all rows as dictionaries
+            
             if not records:
                 raise Exception("Planilha vazia - adicione dados nas linhas 2+")
-            for record in records[1:7]:  # Pula o header (linha 1), pega até 6 itens
-                # Mapeamento das colunas
+            
+            # Process up to 6 records (excluding header row) for display
+            for record in records[:6]: # Takes the first 6 records after header
                 service = record.get('NOME DA MINIATURA', 'Miniatura Desconhecida')
                 marca = record.get('MARCA/FABRICANTE', '')
                 obs = record.get('OBSERVAÇÕES', '')
-                description = f"{marca} - {obs}".strip(' - ') # Concatena e remove traços extras
-                thumbnail_url = record.get('IMAGEM', LOGO_URL)  # URL da imagem
+                description = f"{marca} - {obs}".strip(' - ') # Combine brand and observations
+                thumbnail_url = record.get('IMAGEM', LOGO_URL) # Use LOGO_URL as fallback if IMAGEM is missing
                 price_raw = record.get('VALOR', '')
-                price = price_raw.replace('R$ ', '').replace(',', '.') if price_raw else '0' # Limpa e formata preço
+                # Clean price string for display, default to '0' if empty
+                price = price_raw.replace('R$ ', '').replace(',', '.') if price_raw else '0'
+                
                 thumbnails.append({
                     'service': service,
                     'description': description or 'Descrição disponível',
                     'thumbnail_url': thumbnail_url,
                     'price': price
                 })
-            logger.info(f"Carregados {len(thumbnails)} thumbnails da planilha BASE DE DADOS JG")
+            logger.info(f"Carregados {len(thumbnails)} thumbnails da planilha")
         except gspread.SpreadsheetNotFound:
-            logger.error("Erro ao carregar planilha: Planilha 'BASE DE DADOS JG' não encontrada. Verifique o nome ou ID.")
-            thumbnails = [{'service': 'Erro: Planilha não encontrada', 'description': 'Verifique o nome da planilha ou ID.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
+            logger.error("Planilha 'BASE DE DADOS JG' não encontrada - verifique nome/ID e permissões.")
+            thumbnails = [{'service': 'Erro: Planilha não encontrada', 'description': 'Verifique nome/ID e permissões.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
         except gspread.exceptions.WorksheetNotFound:
-            logger.error("Erro ao carregar planilha: Aba 'sheet1' não encontrada. Crie uma aba padrão.")
-            thumbnails = [{'service': 'Erro: Aba sheet1 não encontrada', 'description': 'Crie uma aba padrão na planilha.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
+            logger.error("Aba 'sheet1' não encontrada na planilha.")
+            thumbnails = [{'service': 'Erro: Aba sheet1 não encontrada', 'description': 'Crie aba padrão ou especifique.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
         except gspread.exceptions.APIError as e:
-            logger.error(f"Erro API Google ao carregar planilha: {e}. Verifique o compartilhamento (Editor) para o Service Account.")
-            thumbnails = [{'service': 'Erro API: Permissão negada', 'description': 'Verifique compartilhamento Editor.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
+            logger.error(f"Erro API Google (permissão/acesso): {e}")
+            thumbnails = [{'service': 'Erro API: Permissão negada', 'description': 'Verifique compartilhamento (Editor) para Service Account.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
         except Exception as e:
-            logger.error(f"Erro geral ao carregar planilha: {e}. Verifique os dados ou formato da planilha.")
+            logger.error(f"Erro inesperado ao carregar planilha: {e}")
             thumbnails = [{'service': 'Fallback', 'description': 'Serviço em manutenção. Contate-nos!', 'thumbnail_url': LOGO_URL, 'price': '0'}]
     else:
-        thumbnails = [{'service': 'Sem Integração Sheets', 'description': 'Configure GOOGLE_SHEETS_CREDENTIALS para ver os itens.', 'thumbnail_url': LOGO_URL, 'price': 'Consultar'}]
+        thumbnails = [{'service': 'Sem Integração Sheets', 'description': 'Configure GOOGLE_SHEETS_CREDENTIALS para carregar dados.', 'thumbnail_url': LOGO_URL, 'price': 'Consultar'}]
     return thumbnails
 
-# --- Templates HTML Inline (com CSS responsivo) ---
-
+# --- Inline Jinja2 HTML Templates ---
 INDEX_HTML = '''
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -151,7 +159,7 @@ INDEX_HTML = '''
 </head>
 <body>
     <header>
-        <img src="{{ logo_url }}" alt="Logo JG MINIS" class="logo">
+        <img src="{{ logo_url }}" alt="Logo JG MINIS" class="logo" onerror="this.src='{{ logo_url }}'">
         <h1>Bem-vindo ao JG MINIS v4.2</h1>
     </header>
     <nav>
@@ -170,7 +178,7 @@ INDEX_HTML = '''
     <main class="thumbnails">
         {% for thumb in thumbnails %}
         <div class="thumbnail">
-            <img src="{{ thumb.thumbnail_url or logo_url }}" alt="{{ thumb.service }}">
+            <img src="{{ thumb.thumbnail_url or logo_url }}" alt="{{ thumb.service }}" onerror="this.src='{{ logo_url }}'">
             <h3>{{ thumb.service }}</h3>
             <p>{{ thumb.description or 'Descrição disponível' }}</p>
             <p>Preço: R$ {{ thumb.price or 'Consultar' }}</p>
@@ -485,24 +493,29 @@ ADMIN_HTML = '''
 </html>
 '''
 
+# --- Flask Routes ---
 @app.route('/', methods=['GET'])
 def index():
+    """Home page displaying service thumbnails."""
     thumbnails = load_thumbnails()
     return render_template_string(INDEX_HTML, logo_url=LOGO_URL, thumbnails=thumbnails)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    """User login page."""
     if request.method == 'POST':
         email = request.form['email'].strip().lower()
         password = request.form['password']
         if not is_valid_email(email):
             flash('Email inválido.', 'error')
             return render_template_string(LOGIN_HTML)
+        
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
-        c.execute("SELECT * FROM users WHERE email = ?", (email,))
+        c.execute("SELECT id, email, password, role FROM users WHERE email = ?", (email,))
         user = c.fetchone()
         conn.close()
+        
         if user and bcrypt.check_password_hash(user[2], password):
             session['user_id'] = user[0]
             session['email'] = user[1]
@@ -517,15 +530,18 @@ def login():
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
+    """New user registration page."""
     if request.method == 'POST':
         email = request.form['email'].strip().lower()
         password = request.form['password']
+        
         if not is_valid_email(email):
             flash('Email inválido.', 'error')
             return render_template_string(REGISTER_HTML)
         if len(password) < 6:
             flash('Senha deve ter pelo menos 6 caracteres.', 'error')
             return render_template_string(REGISTER_HTML)
+        
         hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
@@ -546,17 +562,25 @@ def register():
 
 @app.route('/reservar', methods=['GET', 'POST'])
 def reservar():
+    """Service reservation page. Requires user to be logged in."""
     if 'user_id' not in session:
         flash('Faça login para reservar.', 'error')
         return redirect(url_for('login'))
-    thumbnails = load_thumbnails()
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    
+    thumbnails = load_thumbnails() # Load current services for selection
+    tomorrow = (date.today() + timedelta(days=1)).isoformat() # Minimum date for reservation
+    
     if request.method == 'POST':
         service = request.form['service']
         selected_date = request.form['date']
-        if selected_date <= date.today().isoformat():
-            flash('Data deve ser futura.', 'error')
+        
+        if not service:
+            flash('Selecione um serviço.', 'error')
             return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
+        if selected_date <= date.today().isoformat():
+            flash('A data da reserva deve ser futura.', 'error')
+            return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
+        
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         c.execute("INSERT INTO reservations (user_id, service, date) VALUES (?, ?, ?)",
@@ -567,18 +591,23 @@ def reservar():
         logger.info(f"Reserva criada ID {res_id} por user {session['user_id']}")
         flash('Reserva realizada! Aguarde aprovação.', 'success')
         return redirect(url_for('profile'))
+    
     return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
 
 @app.route('/profile', methods=['GET'])
 def profile():
+    """User profile page displaying their reservations."""
     if 'user_id' not in session:
-        flash('Faça login para ver perfil.', 'error')
+        flash('Faça login para ver seu perfil.', 'error')
         return redirect(url_for('login'))
+    
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
+    
     c.execute("SELECT data_cadastro FROM users WHERE id = ?", (session['user_id'],))
     user_data = c.fetchone()
     data_cadastro = user_data[0] if user_data else 'Desconhecida'
+    
     c.execute("""
         SELECT r.id, r.service, r.date, r.status, r.denied_reason 
         FROM reservations r 
@@ -587,17 +616,24 @@ def profile():
     """, (session['user_id'],))
     reservations = c.fetchall()
     conn.close()
+    
     return render_template_string(PROFILE_HTML, data_cadastro=data_cadastro, reservations=reservations)
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
+    """Admin panel for managing users and reservations. Requires admin role."""
     if session.get('role') != 'admin':
         flash('Acesso negado. Apenas para administradores.', 'error')
         return redirect(url_for('index'))
+    
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
+    
+    # Fetch all users
     c.execute("SELECT id, email, role, data_cadastro FROM users ORDER BY data_cadastro DESC")
     users = c.fetchall()
+    
+    # Fetch pending reservations
     c.execute("""
         SELECT r.id, r.service, r.date, r.user_id, u.email as user_email 
         FROM reservations r 
@@ -606,6 +642,8 @@ def admin():
         ORDER BY r.created_at DESC
     """)
     pending_reservations = c.fetchall()
+    
+    # Fetch all reservations
     c.execute("""
         SELECT r.id, r.service, r.date, r.status, r.denied_reason, u.email as user_email 
         FROM reservations r 
@@ -613,9 +651,11 @@ def admin():
         ORDER BY r.created_at DESC
     """)
     all_reservations = c.fetchall()
+    
     if request.method == 'POST':
         action = request.form.get('action')
         res_id = request.form.get('res_id')
+        
         if action == 'approve' and res_id:
             c.execute("UPDATE reservations SET status = 'approved', approved_by = ? WHERE id = ?", (session['user_id'], res_id))
             conn.commit()
@@ -627,17 +667,25 @@ def admin():
             conn.commit()
             flash('Reserva rejeitada.', 'success')
             logger.info(f"Admin {session['email']} rejeitou reserva {res_id}: {reason}")
+        
+        # Handle demote action (from GET request for simplicity in template)
+        # This part is typically handled via POST for security, but kept as per previous interaction
         elif 'demote_' in request.args:
             user_id_to_demote = int(request.args['demote_'][7:])
-            if user_id_to_demote != session['user_id']:
+            if user_id_to_demote != session['user_id']: # Admin cannot demote themselves
                 c.execute("UPDATE users SET role = 'user' WHERE id = ?", (user_id_to_demote,))
                 conn.commit()
                 flash(f'Usuário rebaixado para user.', 'success')
+        
+        conn.close()
+        return redirect(url_for('admin')) # Redirect to refresh admin page after action
+    
     conn.close()
     return render_template_string(ADMIN_HTML, users=users, pending_reservations=pending_reservations, all_reservations=all_reservations)
 
 @app.route('/logout', methods=['GET'])
 def logout():
+    """Logs out the current user."""
     if 'user_id' in session:
         logger.info(f"Logout de {session['email']}")
     session.clear()
@@ -646,20 +694,26 @@ def logout():
 
 @app.route('/favicon.ico')
 def favicon():
-    # Retorna um status 204 (No Content) para evitar 404 no console do navegador
+    """Handles favicon requests to prevent 404 errors in browser console."""
+    # You can serve a real favicon here using send_from_directory
+    # For now, we return a 204 No Content response to silence the browser request
     return '', 204
 
+# --- Error Handlers ---
 @app.errorhandler(404)
 def not_found_error(error):
+    """Custom 404 Not Found error page."""
     return render_template_string('<h1>404 - Página Não Encontrada</h1><p><a href="/">Voltar ao Home</a></p>'), 404
 
 @app.errorhandler(500)
 def internal_error(error):
+    """Custom 500 Internal Server Error page."""
     logger.error(f"Erro interno 500: {error}")
     return render_template_string('<h1>500 - Erro Interno</h1><p>Algo deu errado. Tente novamente.</p><a href="/">Home</a>'), 500
 
+# --- Application Entry Point ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     host = '0.0.0.0'
-    app.run(host=host, port=port, debug=False)
+    app.run(host=host, port=port, debug=False) # debug=False for production
     logger.info(f"App rodando em {host}:{port}")
