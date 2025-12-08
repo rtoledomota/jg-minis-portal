@@ -7,24 +7,20 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from flask_bcrypt import Bcrypt
 import gspread
 from google.oauth2.service_account import Credentials
-import re  # Para validação de email
+import re
 
-# Configurações de logging para Railway (debug em produção)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configurações de ambiente (com fallbacks para desenvolvimento local)
 LOGO_URL = os.environ.get('LOGO_URL', 'https://via.placeholder.com/150x50?text=JG+MINIS+Logo')
-GOOGLE_SHEETS_CREDENTIALS = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')  # JSON string minificado
+GOOGLE_SHEETS_CREDENTIALS = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'jgminis_v4_secret_2025_dev_key_fallback')
-DATABASE = os.environ.get('DATABASE', '/tmp/jgminis.db')  # SQLite path para Railway/Heroku
+DATABASE = os.environ.get('DATABASE', '/tmp/jgminis.db')
 
-# Inicializa Flask e Bcrypt
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 bcrypt = Bcrypt(app)
 
-# Configuração gspread com auth moderna (google-auth, sem oauth2client)
 gc = None
 if GOOGLE_SHEETS_CREDENTIALS:
     try:
@@ -40,35 +36,30 @@ else:
     logger.warning("GOOGLE_SHEETS_CREDENTIALS não definida - usando fallback sem Sheets")
     gc = None
 
-# Função para validar email com regex
 def is_valid_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# Inicialização do banco SQLite (tabelas expandidas)
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    # Tabela users (adicionado data_cadastro)
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   email TEXT UNIQUE NOT NULL,
                   password TEXT NOT NULL,
                   role TEXT DEFAULT 'user',
                   data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # Tabela reservations (adicionado approved_by, denied_reason)
     c.execute('''CREATE TABLE IF NOT EXISTS reservations
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER NOT NULL,
                   service TEXT NOT NULL,
-                  date TEXT NOT NULL,  -- Formato YYYY-MM-DD
+                  date TEXT NOT NULL,
                   status TEXT DEFAULT 'pending',
-                  approved_by INTEGER,  -- ID admin que aprovou
+                  approved_by INTEGER,
                   denied_reason TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users (id),
                   FOREIGN KEY (approved_by) REFERENCES users (id))''')
-    # Admin user default
     c.execute("SELECT id FROM users WHERE email = 'admin@jgminis.com.br'")
     if not c.fetchone():
         hashed_password = bcrypt.generate_password_hash('admin123').decode('utf-8')
@@ -79,7 +70,13 @@ def init_db():
 
 init_db()
 
-# --- Templates HTML Inline (com CSS responsivo) ---
+# def send_email(to_email, subject, body):
+#     # Email functionality is commented out to avoid ImportError
+#     # If you wish to enable email, uncomment this function and its calls,
+#     # and ensure SMTP_USER, SMTP_PASS, SMTP_SERVER, SMTP_PORT are set in environment variables.
+#     # Also, ensure 'email' module imports are present.
+#     logger.info(f"Email functionality is disabled. Would send to {to_email}: {subject}")
+#     return True
 
 INDEX_HTML = '''
 <!DOCTYPE html>
@@ -199,12 +196,476 @@ LOGIN_HTML = '''
 </html>
 '''
 
-# [O código continua com os outros templates e rotas, mas para brevidade, o documento completo está no download. O tool gerou o arquivo inteiro sem quebras.]
+REGISTER_HTML = '''
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Registrar - JG MINIS v4.2</title>
+    <style>
+        body { font-family: Arial; background: #f8f9fa; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .form-container { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); width: 300px; text-align: center; }
+        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
+        button { width: 100%; padding: 10px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #218838; }
+        .flash { padding: 10px; margin: 10px 0; border-radius: 5px; text-align: center; }
+        .flash-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .flash-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="form-container">
+        <h2>Registrar Usuário</h2>
+        <form method="POST">
+            <input type="email" name="email" placeholder="Email" required>
+            <input type="password" name="password" placeholder="Senha" required minlength="6">
+            <button type="submit">Registrar</button>
+        </form>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                <div class="flash flash-{{ 'success' if category == 'success' else 'error' }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <p><a href="{{ url_for('login') }}">Já tem conta? Fazer Login</a></p>
+        <p><a href="{{ url_for('index') }}">Voltar ao Home</a></p>
+    </div>
+</body>
+</html>
+'''
 
-#### Próximos Passos
-- Cole no GitHub app.py > Commit > Push.
-- Railway redeploy – logs sem ImportError.
-- Teste URL: Carrega home.
-- Se erro, cole log novo.
+RESERVAR_HTML = '''
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reservar Serviço - JG MINIS v4.2</title>
+    <style>
+        body { font-family: Arial; background: #f8f9fa; padding: 20px; }
+        .container { max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h2 { text-align: center; color: #333; }
+        form { display: flex; flex-direction: column; }
+        label { margin: 10px 0 5px; font-weight: bold; }
+        input, select { padding: 10px; border: 1px solid #ddd; border-radius: 5px; margin-bottom: 15px; }
+        button { padding: 12px; background: #ffc107; color: black; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; }
+        button:hover { background: #e0a800; }
+        .flash { padding: 10px; margin: 10px 0; border-radius: 5px; text-align: center; }
+        .flash-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .flash-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .services-list { margin: 20px 0; }
+        .service-option { padding: 10px; background: #e9ecef; margin: 5px 0; border-radius: 5px; cursor: pointer; }
+        .service-option:hover { background: #dee2e6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Reservar Serviço</h2>
+        {% if not session.user_id %}
+        <div class="flash flash-error">
+            <p>Faça <a href="{{ url_for('login') }}">login</a> para reservar.</p>
+        </div>
+        {% else %}
+        <form method="POST">
+            <label for="service">Serviço:</label>
+            <select name="service" id="service" required>
+                <option value="">Selecione um serviço</option>
+                {% for thumb in thumbnails %}
+                <option value="{{ thumb.service }}">{{ thumb.service }} - R$ {{ thumb.price }}</option>
+                {% endfor %}
+            </select>
+            <label for="date">Data (apenas datas futuras):</label>
+            <input type="date" name="date" id="date" required min="{{ tomorrow }}">
+            <button type="submit">Confirmar Reserva</button>
+        </form>
+        <div class="services-list">
+            <h3>Serviços Disponíveis:</h3>
+            {% for thumb in thumbnails %}
+            <div class="service-option">
+                <strong>{{ thumb.service }}</strong> - {{ thumb.description }} - R$ {{ thumb.price }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                <div class="flash flash-{{ 'success' if category == 'success' else 'error' }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <p><a href="{{ url_for('index') }}">Voltar ao Home</a> | <a href="{{ url_for('profile') }}">Minhas Reservas</a></p>
+    </div>
+    <script>
+        const today = new Date().toISOString().split('T')[0];
+        document.getElementById('date').setAttribute('min', today);
+    </script>
+</body>
+</html>
+'''
 
-O documento está pronto para download – use para fixar! Me diga resultado. 😊
+PROFILE_HTML = '''
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meu Perfil - JG MINIS v4.2</title>
+    <style>
+        body { font-family: Arial; background: #f8f9fa; padding: 20px; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h2 { text-align: center; color: #333; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 10px; background: #e9ecef; margin: 10px 0; border-radius: 5px; }
+        li.approved { background: #d4edda; }
+        li.denied { background: #f8d7da; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Meu Perfil</h2>
+        <p><strong>Email:</strong> {{ session.email }}</p>
+        <p><strong>Data de Cadastro:</strong> {{ data_cadastro }}</p>
+        <h3>Minhas Reservas:</h3>
+        <ul>
+            {% for res in reservations %}
+            <li class="{{ 'approved' if res.status == 'approved' else 'denied' if res.status == 'denied' else 'pending' }}">
+                <strong>Serviço:</strong> {{ res.service }} | <strong>Data:</strong> {{ res.date }} | <strong>Status:</strong> {{ res.status.title() }}
+                {% if res.denied_reason %} | <em>Motivo rejeitado: {{ res.denied_reason }}</em>{% endif %}
+            </li>
+            {% endfor %}
+            {% if not reservations %}
+            <li>Nenhuma reserva encontrada. <a href="{{ url_for('reservar') }}">Faça uma agora!</a></li>
+            {% endif %}
+        </ul>
+        <p><a href="{{ url_for('index') }}">Voltar ao Home</a> | <a href="{{ url_for('logout') }}">Logout</a></p>
+    </div>
+</body>
+</html>
+'''
+
+ADMIN_HTML = '''
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - JG MINIS v4.2</title>
+    <style>
+        body { font-family: Arial; background: #f8f9fa; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h2, h3 { text-align: center; color: #333; }
+        ul { list-style: none; padding: 0; }
+        li { padding: 10px; background: #e9ecef; margin: 10px 0; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
+        li.pending { background: #fff3cd; }
+        li.approved { background: #d4edda; }
+        li.denied { background: #f8d7da; }
+        .actions { margin-left: 10px; }
+        button { padding: 5px 10px; margin: 0 5px; border: none; border-radius: 3px; cursor: pointer; }
+        .approve { background: #28a745; color: white; }
+        .deny { background: #dc3545; color: white; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Painel Admin</h2>
+        <h3>Usuários Cadastrados ({{ users|length }})</h3>
+        <ul>
+            {% for user in users %}
+            <li>
+                <span>{{ user.email }} - Role: {{ user.role }} - Cadastrado: {{ user.data_cadastro }}</span>
+                {% if user.role != 'admin' %}
+                <span class="actions">
+                    <a href="?demote_user_id={{ user.id }}" style="color: #dc3545;">[Demote]</a>
+                </span>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        <h3>Reservas Pendentes ({{ pending_reservations|length }})</h3>
+        <ul>
+            {% for res in pending_reservations %}
+            <li class="pending">
+                <span>ID {{ res.id }}: {{ res.service }} por {{ res.user_email }} em {{ res.date }}</span>
+                <span class="actions">
+                    <form method="POST" style="display: inline;">
+                        <input type="hidden" name="action" value="approve">
+                        <input type="hidden" name="res_id" value="{{ res.id }}">
+                        <button type="submit" class="approve">Aprovar</button>
+                    </form>
+                    <form method="POST" style="display: inline;">
+                        <input type="hidden" name="action" value="deny">
+                        <input type="hidden" name="res_id" value="{{ res.id }}">
+                        <input type="text" name="reason" placeholder="Motivo rejeição" style="width: 100px; padding: 2px;" required>
+                        <button type="submit" class="deny">Rejeitar</button>
+                    </form>
+                </span>
+            </li>
+            {% endfor %}
+        </ul>
+        <h3>Todas as Reservas</h3>
+        <ul>
+            {% for res in all_reservations %}
+            <li class="{{ res.status }}">
+                <span>ID {{ res.id }}: {{ res.service }} por {{ res.user_email }} em {{ res.date }} (Status: {{ res.status.title() }})</span>
+                {% if res.denied_reason %}<span> - Motivo: {{ res.denied_reason }}</span>{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                <div class="flash flash-{{ 'success' if category == 'success' else 'error' }}" style="margin: 20px 0; padding: 10px; border-radius: 5px; text-align: center;">
+                    {{ message }}
+                </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <p><a href="{{ url_for('index') }}">Voltar ao Home</a> | <a href="{{ url_for('logout') }}">Logout Admin</a></p>
+    </div>
+</body>
+</html>
+'''
+
+@app.route('/', methods=['GET'])
+def index():
+    thumbnails = []
+    if gc:
+        try:
+            sheet = gc.open("JG Minis Sheet").sheet1
+            records = sheet.get_all_records()
+            for record in records[:6]:
+                thumbnails.append({
+                    'service': record.get('service', 'Serviço Desconhecido'),
+                    'description': record.get('description', 'Descrição não disponível'),
+                    'thumbnail_url': record.get('thumbnail_url', LOGO_URL),
+                    'price': record.get('price', 'Consultar')
+                })
+            logger.info(f"Carregados {len(thumbnails)} thumbnails do Sheets")
+        except Exception as e:
+            logger.error(f"Erro ao carregar Sheets: {e}")
+            thumbnails = [{'service': 'Fallback', 'description': 'Serviço em manutenção', 'thumbnail_url': LOGO_URL, 'price': 'R$ 0'}]
+    else:
+        thumbnails = [{'service': 'Sem Integração', 'description': 'Configure Sheets para mais detalhes', 'thumbnail_url': LOGO_URL, 'price': 'Consultar'}]
+    return render_template_string(INDEX_HTML, logo_url=LOGO_URL, thumbnails=thumbnails)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form['email'].strip().lower()
+        password = request.form['password']
+        if not is_valid_email(email):
+            flash('Email inválido.', 'error')
+            return render_template_string(LOGIN_HTML)
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE email = ?", (email,))
+        user = c.fetchone()
+        conn.close()
+        if user and bcrypt.check_password_hash(user[2], password):
+            session['user_id'] = user[0]
+            session['email'] = user[1]
+            session['role'] = user[3]
+            logger.info(f"Login bem-sucedido para {email}")
+            flash('Login realizado com sucesso!', 'success')
+            return redirect(url_for('index'))
+        else:
+            flash('Email ou senha incorretos.', 'error')
+            logger.warning(f"Falha de login para {email}")
+    return render_template_string(LOGIN_HTML)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        email = request.form['email'].strip().lower()
+        password = request.form['password']
+        if not is_valid_email(email):
+            flash('Email inválido.', 'error')
+            return render_template_string(REGISTER_HTML)
+        if len(password) < 6:
+            flash('Senha deve ter pelo menos 6 caracteres.', 'error')
+            return render_template_string(REGISTER_HTML)
+        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        try:
+            c.execute("INSERT INTO users (email, password) VALUES (?, ?)", (email, hashed_password))
+            conn.commit()
+            user_id = c.lastrowid
+            conn.close()
+            logger.info(f"Registro bem-sucedido para {email}")
+            flash('Registro realizado! Faça login.', 'success')
+            # send_email(email, 'Bem-vindo ao JG MINIS', f'Obrigado por se registrar, {email}! Seu login está pronto.')
+            return redirect(url_for('login'))
+        except sqlite3.IntegrityError:
+            flash('Email já cadastrado. Faça login.', 'error')
+            conn.close()
+        except Exception as e:
+            logger.error(f"Erro no registro: {e}")
+            flash('Erro interno. Tente novamente.', 'error')
+            conn.close()
+    return render_template_string(REGISTER_HTML)
+
+@app.route('/reservar', methods=['GET', 'POST'])
+def reservar():
+    if 'user_id' not in session:
+        flash('Faça login para reservar.', 'error')
+        return redirect(url_for('login'))
+    thumbnails = []
+    if gc:
+        try:
+            sheet = gc.open("JG Minis Sheet").sheet1
+            records = sheet.get_all_records()
+            for record in records:
+                thumbnails.append({
+                    'service': record.get('service', ''),
+                    'description': record.get('description', ''),
+                    'thumbnail_url': record.get('thumbnail_url', LOGO_URL),
+                    'price': record.get('price', '')
+                })
+        except Exception as e:
+            logger.error(f"Erro thumbnails reservar: {e}")
+    
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    
+    if request.method == 'POST':
+        service = request.form['service']
+        selected_date_str = request.form['date']
+        
+        try:
+            selected_date = date.fromisoformat(selected_date_str)
+            if selected_date <= date.today():
+                flash('Data deve ser futura.', 'error')
+                return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
+        except ValueError:
+            flash('Formato de data inválido.', 'error')
+            return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
+
+        conn = sqlite3.connect(DATABASE)
+        c = conn.cursor()
+        c.execute("INSERT INTO reservations (user_id, service, date) VALUES (?, ?, ?)",
+                  (session['user_id'], service, selected_date_str))
+        res_id = c.lastrowid
+        conn.commit()
+        conn.close()
+        logger.info(f"Reserva criada ID {res_id} por user {session['user_id']}")
+        flash('Reserva realizada! Aguarde aprovação.', 'success')
+        # send_email(session['email'], 'Reserva Recebida', f'Sua reserva para {service} em {selected_date_str} foi enviada para aprovação.')
+        return redirect(url_for('profile'))
+    return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
+
+@app.route('/profile', methods=['GET'])
+def profile():
+    if 'user_id' not in session:
+        flash('Faça login para ver perfil.', 'error')
+        return redirect(url_for('login'))
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    c.execute("SELECT data_cadastro FROM users WHERE id = ?", (session['user_id'],))
+    user_data = c.fetchone()
+    data_cadastro = user_data[0] if user_data else 'Desconhecida'
+    c.execute("""
+        SELECT r.id, r.service, r.date, r.status, r.denied_reason 
+        FROM reservations r 
+        WHERE r.user_id = ? 
+        ORDER BY r.created_at DESC
+    """, (session['user_id'],))
+    reservations = c.fetchall()
+    conn.close()
+    return render_template_string(PROFILE_HTML, data_cadastro=data_cadastro, reservations=reservations)
+
+@app.route('/admin', methods=['GET', 'POST'])
+def admin():
+    if session.get('role') != 'admin':
+        flash('Acesso negado. Apenas para administradores.', 'error')
+        return redirect(url_for('index'))
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+    
+    if request.method == 'POST':
+        action = request.form.get('action')
+        res_id = request.form.get('res_id')
+        if action == 'approve' and res_id:
+            c.execute("UPDATE reservations SET status = 'approved', approved_by = ? WHERE id = ?", (session['user_id'], res_id))
+            conn.commit()
+            flash('Reserva aprovada.', 'success')
+            logger.info(f"Admin {session['email']} aprovou reserva {res_id}")
+            # user_email = c.execute("SELECT u.email FROM users u JOIN reservations r ON u.id = r.user_id WHERE r.id = ?", (res_id,)).fetchone()[0]
+            # service_date = c.execute("SELECT service, date FROM reservations WHERE id = ?", (res_id,)).fetchone()
+            # send_email(user_email, 'Reserva Aprovada', f'Sua reserva para {service_date[0]} em {service_date[1]} foi aprovada!')
+        elif action == 'deny' and res_id:
+            reason = request.form.get('reason', 'Motivo não especificado')
+            c.execute("UPDATE reservations SET status = 'denied', denied_reason = ? WHERE id = ?", (reason, res_id))
+            conn.commit()
+            flash('Reserva rejeitada.', 'success')
+            logger.info(f"Admin {session['email']} rejeitou reserva {res_id}: {reason}")
+            # user_email = c.execute("SELECT u.email FROM users u JOIN reservations r ON u.id = r.user_id WHERE r.id = ?", (res_id,)).fetchone()[0]
+            # service_date = c.execute("SELECT service, date FROM reservations WHERE id = ?", (res_id,)).fetchone()
+            # send_email(user_email, 'Reserva Rejeitada', f'Sua reserva para {service_date[0]} em {service_date[1]} foi rejeitada: {reason}')
+        return redirect(url_for('admin')) # Redirect to prevent re-submission
+    
+    if 'demote_user_id' in request.args and session.get('role') == 'admin':
+        user_id_to_demote = request.args.get('demote_user_id', type=int)
+        if user_id_to_demote and user_id_to_demote != session['user_id']:
+            c.execute("UPDATE users SET role = 'user' WHERE id = ?", (user_id_to_demote,))
+            conn.commit()
+            flash(f'Usuário {user_id_to_demote} rebaixado para user.', 'success')
+            logger.info(f"Admin {session['email']} demoted user {user_id_to_demote}")
+        else:
+            flash('Não foi possível rebaixar o usuário.', 'error')
+        return redirect(url_for('admin'))
+
+    c.execute("SELECT id, email, role, data_cadastro FROM users ORDER BY data_cadastro DESC")
+    users = c.fetchall()
+    
+    c.execute("""
+        SELECT r.id, r.service, r.date, r.user_id, u.email as user_email 
+        FROM reservations r 
+        JOIN users u ON r.user_id = u.id 
+        WHERE r.status = 'pending' 
+        ORDER BY r.created_at DESC
+    """)
+    pending_reservations = c.fetchall()
+    
+    c.execute("""
+        SELECT r.id, r.service, r.date, r.status, r.denied_reason, u.email as user_email 
+        FROM reservations r 
+        JOIN users u ON r.user_id = u.id 
+        ORDER BY r.created_at DESC
+    """)
+    all_reservations = c.fetchall()
+    conn.close()
+    return render_template_string(ADMIN_HTML, users=users, pending_reservations=pending_reservations, all_reservations=all_reservations)
+
+@app.route('/logout', methods=['GET'])
+def logout():
+    if 'user_id' in session:
+        logger.info(f"Logout de {session['email']}")
+    session.clear()
+    flash('Logout realizado com sucesso!', 'success')
+    return redirect(url_for('index'))
+
+@app.errorhandler(404)
+def not_found_error(error):
+    return render_template_string('<h1>404 - Página Não Encontrada</h1><p><a href="/">Voltar ao Home</a></p>'), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    logger.error(f"Erro interno 500: {error}")
+    return render_template_string('<h1>500 - Erro Interno</h1><p>Algo deu errado. Tente novamente.</p><a href="/">Home</a>'), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    host = '0.0.0.0'
+    app.run(host=host, port=port, debug=False)
+    logger.info(f"App rodando em {host}:{port}")
