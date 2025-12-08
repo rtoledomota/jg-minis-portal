@@ -73,6 +73,7 @@ def init_db():
     if not c.fetchone():
         hashed_password = bcrypt.generate_password_hash('admin123').decode('utf-8')
         c.execute("INSERT INTO users (email, password, role) VALUES ('admin@jgminis.com.br', ?, 'admin')", (hashed_password,))
+        conn.commit()
         logger.info("Usuário admin criado no DB")
     conn.commit()
     conn.close()
@@ -393,7 +394,7 @@ ADMIN_HTML = '''
                 <span>{{ user.email }} - Role: {{ user.role }} - Cadastrado: {{ user.data_cadastro }}</span>
                 {% if user.role != 'admin' %}
                 <span class="actions">
-                    <a href="?demote_user_id={{ user.id }}" onclick="return confirm('Tem certeza que deseja rebaixar este usuário?')">Rebaixar</a>
+                    <a href="?demote_{{ user.id }}" onclick="return confirm('Rebaixar user?')">Demote</a>
                 </span>
                 {% endif %}
             </li>
@@ -451,7 +452,7 @@ def index():
         try:
             sheet = gc.open("JG Minis Sheet").sheet1
             records = sheet.get_all_records()
-            for record in records[:6]: # Limita a 6 thumbnails
+            for record in records[:6]: # Limita a 6 thumbnails para a home
                 thumbnails.append({
                     'service': record.get('service', 'Serviço Desconhecido'),
                     'description': record.get('description', 'Descrição não disponível'),
@@ -476,7 +477,7 @@ def login():
             return render_template_string(LOGIN_HTML)
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
-        c.execute("SELECT id, email, password, role FROM users WHERE email = ?", (email,))
+        c.execute("SELECT * FROM users WHERE email = ?", (email,))
         user = c.fetchone()
         conn.close()
         if user and bcrypt.check_password_hash(user[2], password):
@@ -539,33 +540,23 @@ def reservar():
                 })
         except Exception as e:
             logger.error(f"Erro thumbnails reservar: {e}")
-    
-    # Garante que a data mínima seja a de amanhã
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
-
     if request.method == 'POST':
         service = request.form['service']
-        selected_date_str = request.form['date']
-        
-        try:
-            selected_date = date.fromisoformat(selected_date_str)
-            if selected_date <= date.today():
-                flash('A data da reserva deve ser futura.', 'error')
-                return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
-        except ValueError:
-            flash('Formato de data inválido.', 'error')
+        selected_date = request.form['date']
+        if selected_date <= date.today().isoformat():
+            flash('Data deve ser futura.', 'error')
             return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
-
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         c.execute("INSERT INTO reservations (user_id, service, date) VALUES (?, ?, ?)",
-                  (session['user_id'], service, selected_date_str))
+                  (session['user_id'], service, selected_date))
         res_id = c.lastrowid
         conn.commit()
         conn.close()
         logger.info(f"Reserva criada ID {res_id} por user {session['user_id']}")
         flash('Reserva realizada! Aguarde aprovação.', 'success')
-        # send_email(session['email'], 'Reserva Recebida', f'Sua reserva para {service} em {selected_date_str} foi enviada para aprovação.')
+        # send_email(session['email'], 'Reserva Recebida', f'Sua reserva para {service} em {selected_date} foi enviada para aprovação.')
         return redirect(url_for('profile'))
     return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
 
@@ -580,40 +571,42 @@ def profile():
     user_data = c.fetchone()
     data_cadastro = user_data[0] if user_data else 'Desconhecida'
     c.execute("""
-        SELECT id, service, date, status, denied_reason 
-        FROM reservations 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC
+        SELECT r.id, r.service, r.date, r.status, r.denied_reason 
+        FROM reservations r 
+        WHERE r.user_id = ? 
+        ORDER BY r.created_at DESC
     """, (session['user_id'],))
     reservations = c.fetchall()
     conn.close()
-    
-    # Convertendo tuplas para dicionários para facilitar o acesso no template
-    reservations_list = []
-    for res in reservations:
-        reservations_list.append({
-            'id': res[0],
-            'service': res[1],
-            'date': res[2],
-            'status': res[3],
-            'denied_reason': res[4]
-        })
-
-    return render_template_string(PROFILE_HTML, data_cadastro=data_cadastro, reservations=reservations_list)
+    return render_template_string(PROFILE_HTML, data_cadastro=data_cadastro, reservations=reservations)
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
     if session.get('role') != 'admin':
         flash('Acesso negado. Apenas para administradores.', 'error')
         return redirect(url_for('index'))
-    
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-
+    c.execute("SELECT id, email, role, data_cadastro FROM users ORDER BY data_cadastro DESC")
+    users = c.fetchall()
+    c.execute("""
+        SELECT r.id, r.service, r.date, r.user_id, u.email as user_email 
+        FROM reservations r 
+        JOIN users u ON r.user_id = u.id 
+        WHERE r.status = 'pending' 
+        ORDER BY r.created_at DESC
+    """)
+    pending_reservations = c.fetchall()
+    c.execute("""
+        SELECT r.id, r.service, r.date, r.status, r.denied_reason, u.email as user_email 
+        FROM reservations r 
+        JOIN users u ON r.user_id = u.id 
+        ORDER BY r.created_at DESC
+    """)
+    all_reservations = c.fetchall()
     if request.method == 'POST':
         action = request.form.get('action')
         res_id = request.form.get('res_id')
-        
         if action == 'approve' and res_id:
             c.execute("UPDATE reservations SET status = 'approved', approved_by = ? WHERE id = ?", (session['user_id'], res_id))
             conn.commit()
@@ -627,53 +620,12 @@ def admin():
             flash('Reserva rejeitada.', 'success')
             logger.info(f"Admin {session['email']} rejeitou reserva {res_id}: {reason}")
             # Envia email ao user (comentado)
-    
-    # Handle demote action from GET request (for simplicity, could be POST)
-    if request.args.get('demote_user_id'):
-        user_id_to_demote = request.args.get('demote_user_id')
-        if int(user_id_to_demote) != session['user_id']: # Admin cannot demote self
-            c.execute("UPDATE users SET role = 'user' WHERE id = ?", (user_id_to_demote,))
-            conn.commit()
-            flash(f'Usuário rebaixado para user.', 'success')
-            logger.info(f"Admin {session['email']} rebaixou usuário {user_id_to_demote}")
-        else:
-            flash('Você não pode rebaixar a si mesmo.', 'error')
-
-    c.execute("SELECT id, email, role, data_cadastro FROM users ORDER BY data_cadastro DESC")
-    users_raw = c.fetchall()
-    users = []
-    for user in users_raw:
-        users.append({
-            'id': user[0], 'email': user[1], 'role': user[2], 'data_cadastro': user[3]
-        })
-
-    c.execute("""
-        SELECT r.id, r.service, r.date, r.user_id, u.email as user_email 
-        FROM reservations r 
-        JOIN users u ON r.user_id = u.id 
-        WHERE r.status = 'pending' 
-        ORDER BY r.created_at DESC
-    """)
-    pending_reservations_raw = c.fetchall()
-    pending_reservations = []
-    for res in pending_reservations_raw:
-        pending_reservations.append({
-            'id': res[0], 'service': res[1], 'date': res[2], 'user_id': res[3], 'user_email': res[4]
-        })
-
-    c.execute("""
-        SELECT r.id, r.service, r.date, r.status, r.denied_reason, u.email as user_email 
-        FROM reservations r 
-        JOIN users u ON r.user_id = u.id 
-        ORDER BY r.created_at DESC
-    """)
-    all_reservations_raw = c.fetchall()
-    all_reservations = []
-    for res in all_reservations_raw:
-        all_reservations.append({
-            'id': res[0], 'service': res[1], 'date': res[2], 'status': res[3], 'denied_reason': res[4], 'user_email': res[5]
-        })
-    
+        elif 'demote_' in request.args: # Demote user (admin only)
+            user_id_to_demote = int(request.args['demote_'][7:])
+            if user_id_to_demote != session['user_id']: # Cannot demote self
+                c.execute("UPDATE users SET role = 'user' WHERE id = ?", (user_id_to_demote,))
+                conn.commit()
+                flash(f'Usuário rebaixado para user.', 'success')
     conn.close()
     return render_template_string(ADMIN_HTML, users=users, pending_reservations=pending_reservations, all_reservations=all_reservations)
 
