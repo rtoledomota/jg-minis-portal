@@ -1153,3 +1153,5 @@ if __name__ == '__main__':
     # Para execução local, use debug=True. Em produção, False.
     # O host 0.0.0.0 é necessário para que a aplicação seja acessível externamente em ambientes de container.
     app.run(host='0.0.0.0', port=8080, debug=False)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080, debug=False)
