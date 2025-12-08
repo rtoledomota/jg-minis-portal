@@ -3,7 +3,7 @@ import json
 import sqlite3
 import logging
 from datetime import datetime, date, timedelta
-from flask import Flask, request, render_template_string, redirect, url_for, session, flash, jsonify, abort
+from flask import Flask, request, render_template_string, redirect, url_for, session, flash, jsonify, abort, send_from_directory
 from flask_bcrypt import Bcrypt
 import gspread
 from google.oauth2.service_account import Credentials
@@ -24,7 +24,7 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 bcrypt = Bcrypt(app)
 
-# Configuração gspread com auth moderna (google-auth)
+# Configuração gspread com auth moderna (google-auth, sem oauth2client)
 gc = None
 if GOOGLE_SHEETS_CREDENTIALS:
     try:
@@ -45,18 +45,18 @@ def is_valid_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# Inicialização do banco SQLite
+# Inicialização do banco SQLite (tabelas expandidas)
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    # Tabela users
+    # Tabela users (adicionado data_cadastro)
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   email TEXT UNIQUE NOT NULL,
                   password TEXT NOT NULL,
                   role TEXT DEFAULT 'user',
                   data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # Tabela reservations
+    # Tabela reservations (adicionado approved_by, denied_reason)
     c.execute('''CREATE TABLE IF NOT EXISTS reservations
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER NOT NULL,
@@ -79,43 +79,45 @@ def init_db():
 
 init_db()
 
-# Função para carregar thumbnails da planilha "BASE DE DADOS JG"
+# Função para carregar thumbnails da planilha "BASE DE DADOS JG" (mapeamento custom)
 def load_thumbnails():
     thumbnails = []
     if gc:
         try:
             sheet = gc.open("BASE DE DADOS JG").sheet1  # Nome da planilha
             records = sheet.get_all_records()  # Pega todas as linhas como dict
-            for record in records:  # Pega todos os itens da planilha
-                # Mapeamento das colunas da planilha para o formato do app
+            if not records:
+                raise Exception("Planilha vazia - adicione dados nas linhas 2+")
+            for record in records[1:7]:  # Pula o header (linha 1), pega até 6 itens
+                # Mapeamento das colunas
                 service = record.get('NOME DA MINIATURA', 'Miniatura Desconhecida')
-                
-                # Combina MARCA/FABRICANTE e OBSERVAÇÕES para a descrição
-                marca_fabricante = record.get('MARCA/FABRICANTE', '').strip()
-                observacoes = record.get('OBSERVAÇÕES', '').strip()
-                description_parts = [part for part in [marca_fabricante, observacoes] if part]
-                description = " - ".join(description_parts) if description_parts else 'Descrição não disponível'
-                
+                marca = record.get('MARCA/FABRICANTE', '')
+                obs = record.get('OBSERVAÇÕES', '')
+                description = f"{marca} - {obs}".strip(' - ') # Concatena e remove traços extras
                 thumbnail_url = record.get('IMAGEM', LOGO_URL)  # URL da imagem
-                
-                # Formata o preço
-                price_raw = str(record.get('VALOR', '')).strip()
-                price = price_raw.replace('R$', '').replace(',', '.').strip() if price_raw else 'Consultar'
-                
+                price_raw = record.get('VALOR', '')
+                price = price_raw.replace('R$ ', '').replace(',', '.') if price_raw else '0' # Limpa e formata preço
                 thumbnails.append({
                     'service': service,
-                    'description': description,
+                    'description': description or 'Descrição disponível',
                     'thumbnail_url': thumbnail_url,
                     'price': price
                 })
             logger.info(f"Carregados {len(thumbnails)} thumbnails da planilha BASE DE DADOS JG")
+        except gspread.SpreadsheetNotFound:
+            logger.error("Erro ao carregar planilha: Planilha 'BASE DE DADOS JG' não encontrada. Verifique o nome ou ID.")
+            thumbnails = [{'service': 'Erro: Planilha não encontrada', 'description': 'Verifique o nome da planilha ou ID.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
+        except gspread.exceptions.WorksheetNotFound:
+            logger.error("Erro ao carregar planilha: Aba 'sheet1' não encontrada. Crie uma aba padrão.")
+            thumbnails = [{'service': 'Erro: Aba sheet1 não encontrada', 'description': 'Crie uma aba padrão na planilha.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
+        except gspread.exceptions.APIError as e:
+            logger.error(f"Erro API Google ao carregar planilha: {e}. Verifique o compartilhamento (Editor) para o Service Account.")
+            thumbnails = [{'service': 'Erro API: Permissão negada', 'description': 'Verifique compartilhamento Editor.', 'thumbnail_url': LOGO_URL, 'price': '0'}]
         except Exception as e:
-            logger.error(f"Erro ao carregar planilha: {e}")
-            # Fallback se houver erro no Sheets
-            thumbnails = [{'service': 'Fallback', 'description': 'Serviço em manutenção', 'thumbnail_url': LOGO_URL, 'price': '0,00'}]
+            logger.error(f"Erro geral ao carregar planilha: {e}. Verifique os dados ou formato da planilha.")
+            thumbnails = [{'service': 'Fallback', 'description': 'Serviço em manutenção. Contate-nos!', 'thumbnail_url': LOGO_URL, 'price': '0'}]
     else:
-        # Fallback se GOOGLE_SHEETS_CREDENTIALS não estiver configurado
-        thumbnails = [{'service': 'Sem Integração', 'description': 'Configure Sheets para mais detalhes', 'thumbnail_url': LOGO_URL, 'price': '0,00'}]
+        thumbnails = [{'service': 'Sem Integração Sheets', 'description': 'Configure GOOGLE_SHEETS_CREDENTIALS para ver os itens.', 'thumbnail_url': LOGO_URL, 'price': 'Consultar'}]
     return thumbnails
 
 # --- Templates HTML Inline (com CSS responsivo) ---
@@ -130,36 +132,13 @@ INDEX_HTML = '''
     <style>
         body { font-family: 'Arial', sans-serif; margin: 0; padding: 20px; background: #f8f9fa; color: #333; }
         header { text-align: center; padding: 20px; background: #007bff; color: white; }
-        img.logo { max-width: 150px; height: auto; margin: 10px; }
-        .thumbnails { 
-            display: grid; 
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
-            gap: 20px; 
-            padding: 20px; 
-            max-width: 1200px; /* Limita largura para PC */
-            margin: 0 auto; /* Centraliza */
-        }
-        .thumbnail { 
-            background: white; 
-            border-radius: 10px; 
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1); 
-            padding: 15px; 
-            text-align: center; 
-            transition: transform 0.2s; 
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-        }
+        img.logo { width: 150px; height: auto; margin: 10px; }
+        .thumbnails { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; padding: 20px; }
+        .thumbnail { background: white; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); padding: 15px; text-align: center; transition: transform 0.2s; }
         .thumbnail:hover { transform: scale(1.05); }
-        .thumbnail img { 
-            width: 100%; 
-            height: 150px; 
-            object-fit: cover; 
-            border-radius: 8px; 
-            margin-bottom: 10px;
-        }
+        .thumbnail img { width: 100%; height: 150px; object-fit: cover; border-radius: 8px; }
         .thumbnail h3 { margin: 10px 0; color: #007bff; }
-        .thumbnail p { margin: 5px 0; flex-grow: 1; }
+        .thumbnail p { margin: 5px 0; }
         nav { text-align: center; padding: 10px; background: #e9ecef; }
         nav a { margin: 0 15px; color: #007bff; text-decoration: none; font-weight: bold; }
         nav a:hover { text-decoration: underline; }
@@ -167,10 +146,7 @@ INDEX_HTML = '''
         .flash-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .flash-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
         footer { text-align: center; padding: 10px; background: #343a40; color: white; margin-top: 40px; }
-        @media (max-width: 600px) { 
-            .thumbnails { grid-template-columns: 1fr; padding: 10px; } 
-            body { padding: 0; }
-        }
+        @media (max-width: 600px) { .thumbnails { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
@@ -341,7 +317,7 @@ RESERVAR_HTML = '''
         </div>
         {% else %}
         <form method="POST">
-            <label for="service">Miniatura:</label>
+            <label for="service">Serviço:</label>
             <select name="service" id="service" required>
                 <option value="">Selecione uma miniatura</option>
                 {% for thumb in thumbnails %}
@@ -667,6 +643,11 @@ def logout():
     session.clear()
     flash('Logout realizado com sucesso!', 'success')
     return redirect(url_for('index'))
+
+@app.route('/favicon.ico')
+def favicon():
+    # Retorna um status 204 (No Content) para evitar 404 no console do navegador
+    return '', 204
 
 @app.errorhandler(404)
 def not_found_error(error):
