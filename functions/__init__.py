@@ -1,4 +1,3 @@
-from .app import handle_request  # Importa o handler
+from .[[path]] import fetch  # Importa o handler catch-all
 
-# Export para Pages
-__all__ = ['handle_request']
+__all__ = ['fetch']
