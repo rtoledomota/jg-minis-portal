@@ -1,3 +1,3 @@
-from .[[path]] import fetch  # Importa o handler catch-all
+from [[path]] import handler
 
-__all__ = ['fetch']
+export default handler
