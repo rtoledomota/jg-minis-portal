@@ -9,22 +9,18 @@ import gspread
 from google.oauth2.service_account import Credentials
 import re
 
-# Configurações de logging para Railway (debug em produção)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configurações de ambiente (com fallbacks para desenvolvimento local)
 LOGO_URL = os.environ.get('LOGO_URL', 'https://via.placeholder.com/150x50?text=JG+MINIS+Logo')
-GOOGLE_SHEETS_CREDENTIALS = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')  # JSON string minificado
+GOOGLE_SHEETS_CREDENTIALS = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'jgminis_v4_secret_2025_dev_key_fallback')
-DATABASE = os.environ.get('DATABASE', '/tmp/jgminis.db')  # SQLite path para Railway/Heroku
+DATABASE = os.environ.get('DATABASE', '/tmp/jgminis.db')
 
-# Inicializa Flask e Bcrypt
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 bcrypt = Bcrypt(app)
 
-# Configuração gspread com auth moderna (google-auth, sem oauth2client)
 gc = None
 if GOOGLE_SHEETS_CREDENTIALS:
     try:
@@ -40,35 +36,30 @@ else:
     logger.warning("GOOGLE_SHEETS_CREDENTIALS não definida - usando fallback sem Sheets")
     gc = None
 
-# Função para validar email com regex
 def is_valid_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# Inicialização do banco SQLite (tabelas expandidas)
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    # Tabela users (adicionado data_cadastro)
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   email TEXT UNIQUE NOT NULL,
                   password TEXT NOT NULL,
                   role TEXT DEFAULT 'user',
                   data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # Tabela reservations (adicionado approved_by, denied_reason)
     c.execute('''CREATE TABLE IF NOT EXISTS reservations
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER NOT NULL,
                   service TEXT NOT NULL,
-                  date TEXT NOT NULL,  -- Formato YYYY-MM-DD
+                  date TEXT NOT NULL,
                   status TEXT DEFAULT 'pending',
-                  approved_by INTEGER,  -- ID admin que aprovou
+                  approved_by INTEGER,
                   denied_reason TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users (id),
                   FOREIGN KEY (approved_by) REFERENCES users (id))''')
-    # Admin user default
     c.execute("SELECT id FROM users WHERE email = 'admin@jgminis.com.br'")
     if not c.fetchone():
         hashed_password = bcrypt.generate_password_hash('admin123').decode('utf-8')
@@ -78,8 +69,6 @@ def init_db():
     conn.close()
 
 init_db()
-
-# --- Templates HTML Inline (com CSS responsivo) ---
 
 INDEX_HTML = '''
 <!DOCTYPE html>
@@ -451,7 +440,7 @@ def index():
         try:
             sheet = gc.open("JG Minis Sheet").sheet1
             records = sheet.get_all_records()
-            for record in records[:6]: # Limita a 6 thumbnails para a home
+            for record in records[:6]:
                 thumbnails.append({
                     'service': record.get('service', 'Serviço Desconhecido'),
                     'description': record.get('description', 'Descrição não disponível'),
@@ -476,7 +465,7 @@ def login():
             return render_template_string(LOGIN_HTML)
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
-        c.execute("SELECT id, email, password, role FROM users WHERE email = ?", (email,))
+        c.execute("SELECT * FROM users WHERE email = ?", (email,))
         user = c.fetchone()
         conn.close()
         if user and bcrypt.check_password_hash(user[2], password):
@@ -538,36 +527,23 @@ def reservar():
                     'price': record.get('price', '')
                 })
         except Exception as e:
-            logger.error(f"Erro ao carregar serviços para reserva: {e}")
-            flash('Erro ao carregar serviços. Tente novamente mais tarde.', 'error')
-    
-    # Garante que a data mínima seja o dia seguinte ao atual
+            logger.error(f"Erro thumbnails reservar: {e}")
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
-
     if request.method == 'POST':
         service = request.form['service']
-        selected_date_str = request.form['date']
-        
-        # Validação de data futura
-        try:
-            selected_date = datetime.strptime(selected_date_str, '%Y-%m-%d').date()
-            if selected_date <= date.today():
-                flash('A data da reserva deve ser futura.', 'error')
-                return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
-        except ValueError:
-            flash('Formato de data inválido.', 'error')
+        selected_date = request.form['date']
+        if selected_date <= date.today().isoformat():
+            flash('Data deve ser futura.', 'error')
             return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
-
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         c.execute("INSERT INTO reservations (user_id, service, date) VALUES (?, ?, ?)",
-                  (session['user_id'], service, selected_date_str))
+                  (session['user_id'], service, selected_date))
         res_id = c.lastrowid
         conn.commit()
         conn.close()
         logger.info(f"Reserva criada ID {res_id} por user {session['user_id']}")
         flash('Reserva realizada! Aguarde aprovação.', 'success')
-        # send_email(session['email'], 'Reserva Recebida', f'Sua reserva para {service} em {selected_date_str} foi enviada para aprovação.')
         return redirect(url_for('profile'))
     return render_template_string(RESERVAR_HTML, thumbnails=thumbnails, tomorrow=tomorrow)
 
@@ -582,10 +558,10 @@ def profile():
     user_data = c.fetchone()
     data_cadastro = user_data[0] if user_data else 'Desconhecida'
     c.execute("""
-        SELECT id, service, date, status, denied_reason 
-        FROM reservations 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC
+        SELECT r.id, r.service, r.date, r.status, r.denied_reason 
+        FROM reservations r 
+        WHERE r.user_id = ? 
+        ORDER BY r.created_at DESC
     """, (session['user_id'],))
     reservations = c.fetchall()
     conn.close()
@@ -596,48 +572,10 @@ def admin():
     if session.get('role') != 'admin':
         flash('Acesso negado. Apenas para administradores.', 'error')
         return redirect(url_for('index'))
-    
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-
-    if request.method == 'POST':
-        action = request.form.get('action')
-        res_id = request.form.get('res_id')
-        
-        if action == 'approve' and res_id:
-            c.execute("UPDATE reservations SET status = 'approved', approved_by = ? WHERE id = ?", (session['user_id'], res_id))
-            conn.commit()
-            flash('Reserva aprovada.', 'success')
-            logger.info(f"Admin {session['email']} aprovou reserva {res_id}")
-            # send_email(user_email, 'Reserva Aprovada', f'Sua reserva para {service} em {date} foi aprovada.')
-        elif action == 'deny' and res_id:
-            reason = request.form.get('reason', 'Motivo não especificado')
-            c.execute("UPDATE reservations SET status = 'denied', denied_reason = ? WHERE id = ?", (reason, res_id))
-            conn.commit()
-            flash('Reserva rejeitada.', 'success')
-            logger.info(f"Admin {session['email']} rejeitou reserva {res_id}: {reason}")
-            # send_email(user_email, 'Reserva Rejeitada', f'Sua reserva para {service} em {date} foi rejeitada. Motivo: {reason}')
-        
-        # Redireciona para evitar re-submissão do form
-        return redirect(url_for('admin'))
-
-    # Lógica para GET request (exibir dados)
-    # Demote user (GET request com query param)
-    for arg in request.args:
-        if arg.startswith('demote_'):
-            user_id_to_demote = int(arg.split('_')[1])
-            if user_id_to_demote != session['user_id']: # Admin não pode rebaixar a si mesmo
-                c.execute("UPDATE users SET role = 'user' WHERE id = ?", (user_id_to_demote,))
-                conn.commit()
-                flash(f'Usuário rebaixado para user.', 'success')
-                logger.info(f"Admin {session['email']} rebaixou user {user_id_to_demote}")
-            else:
-                flash('Você não pode rebaixar a si mesmo.', 'error')
-            return redirect(url_for('admin')) # Redireciona após ação
-
     c.execute("SELECT id, email, role, data_cadastro FROM users ORDER BY data_cadastro DESC")
     users = c.fetchall()
-    
     c.execute("""
         SELECT r.id, r.service, r.date, r.user_id, u.email as user_email 
         FROM reservations r 
@@ -646,7 +584,6 @@ def admin():
         ORDER BY r.created_at DESC
     """)
     pending_reservations = c.fetchall()
-    
     c.execute("""
         SELECT r.id, r.service, r.date, r.status, r.denied_reason, u.email as user_email 
         FROM reservations r 
@@ -654,7 +591,26 @@ def admin():
         ORDER BY r.created_at DESC
     """)
     all_reservations = c.fetchall()
-    
+    if request.method == 'POST':
+        action = request.form.get('action')
+        res_id = request.form.get('res_id')
+        if action == 'approve' and res_id:
+            c.execute("UPDATE reservations SET status = 'approved', approved_by = ? WHERE id = ?", (session['user_id'], res_id))
+            conn.commit()
+            flash('Reserva aprovada.', 'success')
+            logger.info(f"Admin {session['email']} aprovou reserva {res_id}")
+        elif action == 'deny' and res_id:
+            reason = request.form.get('reason', 'Motivo não especificado')
+            c.execute("UPDATE reservations SET status = 'denied', denied_reason = ? WHERE id = ?", (reason, res_id))
+            conn.commit()
+            flash('Reserva rejeitada.', 'success')
+            logger.info(f"Admin {session['email']} rejeitou reserva {res_id}: {reason}")
+        elif 'demote_' in request.args:
+            user_id_to_demote = int(request.args['demote_'][7:])
+            if user_id_to_demote != session['user_id']:
+                c.execute("UPDATE users SET role = 'user' WHERE id = ?", (user_id_to_demote,))
+                conn.commit()
+                flash(f'Usuário rebaixado para user.', 'success')
     conn.close()
     return render_template_string(ADMIN_HTML, users=users, pending_reservations=pending_reservations, all_reservations=all_reservations)
 
