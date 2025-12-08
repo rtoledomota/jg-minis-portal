@@ -1,3 +1,4 @@
-from .app import app  # Importa o Flask app de app.py na mesma pasta
+from .app import handle_request  # Importa o handler
 
-__all__ = ['app']  # Exporta para Pages
+# Export para Pages
+__all__ = ['handle_request']
