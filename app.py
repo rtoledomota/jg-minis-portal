@@ -21,9 +21,9 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.12') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.11') # Chave secreta para sessões
 
-# Caminho do banco de dados (persistente no Railway via /tmp)
+# Define o caminho do banco de dados, usando variável de ambiente ou padrão
 DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db')
 
 # --- Funções de Banco de Dados ---
@@ -85,6 +85,13 @@ def init_db():
         usuarios_count = c.fetchone()[0]
         if usuarios_count == 0:
             logging.warning('DB inicializado: 0 usuários encontrados. Considere restaurar de um backup JSON.')
+            # Cria usuário admin padrão se DB estiver vazio
+            admin_email = 'admin@jgminis.com.br'
+            admin_password_hash = hashlib.sha256('admin123'.encode()).hexdigest()
+            c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
+                      ('Admin', admin_email, admin_password_hash, True))
+            conn.commit()
+            logging.info(f'Usuário admin padrão criado: {admin_email}')
         else:
             logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
 
@@ -817,7 +824,9 @@ def admin_restore_backup():
                 # Verifica integridade do hash
                 received_hash = backup_data.pop('hash', None)
                 if received_hash:
-                    calculated_hash = hashlib.sha256(json.dumps(backup_data, indent=4, ensure_ascii=False).encode()).hexdigest()
+                    # Recria o JSON sem o hash para calcular o hash do conteúdo
+                    content_for_hash = json.dumps(backup_data, indent=4, ensure_ascii=False)
+                    calculated_hash = hashlib.sha256(content_for_hash.encode()).hexdigest()
                     if received_hash != calculated_hash:
                         flash('Erro de integridade do backup: hash não corresponde.', 'error')
                         logging.error('Erro de integridade do backup: hash não corresponde.')
@@ -870,15 +879,6 @@ def admin_restore_backup():
         else:
             flash('Por favor, selecione um arquivo JSON válido.', 'error')
     return redirect(url_for('admin_panel'))
-
-# --- API Endpoints (Exemplo) ---
-@app.route('/api/carros')
-def api_carros():
-    """Retorna a lista de carros em formato JSON."""
-    carros = get_all_cars()
-    # Converte Row objects para dicionários para serialização JSON
-    carros_dict = [dict(carro) for carro in carros]
-    return jsonify(carros_dict)
 
 # --- Tratamento de Erros ---
 @app.errorhandler(500)
