@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, send_file
+from flask import Flask, render_template_string, request, redirect, url_for, session, flash, jsonify, send_file
 import sqlite3
 import json
 from datetime import datetime, timedelta
@@ -21,7 +21,7 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.16') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.17') # Chave secreta para sessões
 
 # Caminho do banco de dados (persistente no Railway via /tmp)
 DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db')
@@ -377,17 +377,90 @@ def home():
     """Página inicial com lista de carros disponíveis."""
     try:
         carros = get_all_cars()
-        if not carros:
-            flash('Nenhum carro disponível no momento. Por favor, adicione carros via painel administrativo.', 'info')
-        return render_template('home.html', carros=carros)
+        flash_messages = ""
+        for category, message in session.pop('_flashes', []):
+            flash_messages += f'<div class="flash {category}">{message}</div>'
+
+        html_content = f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Home</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                ul {{ list-style-type: none; padding: 0; }}
+                li {{ background: #eee; margin-bottom: 10px; padding: 10px; border-radius: 4px; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                .flash.info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
+                .flash.warning {{ background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+                .nav-links {{ margin-top: 20px; }}
+                .nav-links a {{ margin-right: 15px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Carros Disponíveis</h1>
+        '''
+        if 'user_id' in session:
+            html_content += f'<p>Bem-vindo(a), {session.get("user_name", "Usuário")}! <a href="/logout">Sair</a></p>'
+            if session.get('is_admin'):
+                html_content += '<p><a href="/admin">Painel Admin</a></p>'
+        else:
+            html_content += '<p><a href="/login">Login</a> | <a href="/registro">Registrar</a></p>'
+
+        if carros:
+            html_content += '<ul>'
+            for car in carros:
+                html_content += f'''
+                <li>
+                    <strong>{car["modelo"]}</strong> ({car["ano"]}) - {car["cor"]} - Placa: {car["placa"]}<br>
+                    Preço por diária: R$ {car["preco_diaria"]:.2f}<br>
+                    Status: {'Disponível' if car["disponivel"] else 'Indisponível'}<br>
+                '''
+                if car["disponivel"] and 'user_id' in session:
+                    html_content += f'<a href="/reservar/{car["id"]}">Reservar</a>'
+                html_content += '</li>'
+            html_content += '</ul>'
+        else:
+            html_content += '<p>Nenhum carro disponível no momento. Por favor, adicione carros via painel administrativo.</p>'
+        
+        html_content += '''
+            </div>
+        </body>
+        </html>
+        '''
+        return render_template_string(html_content)
     except Exception as e:
-        logging.error(f"Erro ao carregar carros na home: {e}")
+        logging.error(f"Erro ao carregar carros na home: {e}", exc_info=True)
         flash('Erro ao carregar a lista de carros. Tente novamente mais tarde.', 'error')
-        return render_template('home.html', carros=[])
+        return render_template_string(f'''
+            <!DOCTYPE html>
+            <html>
+            <head><title>Erro</title></head>
+            <body>
+                <div class="container">
+                    <h1>Erro</h1>
+                    <p>Ocorreu um erro ao carregar a página inicial. {e}</p>
+                    <a href="/home">Tentar novamente</a>
+                </div>
+            </body>
+            </html>
+        '''), 500
 
 @app.route('/registro', methods=['GET', 'POST'])
 def registro():
     """Rota para registro de novos usuários."""
+    flash_messages = ""
+    for category, message in session.pop('_flashes', []):
+        flash_messages += f'<div class="flash {category}">{message}</div>'
+
     if request.method == 'POST':
         nome = request.form['nome']
         email = request.form['email']
@@ -398,19 +471,19 @@ def registro():
         # Validações básicas
         if not nome or not email or not senha:
             flash('Todos os campos obrigatórios devem ser preenchidos.', 'error')
-            return render_template('registro.html')
+            return redirect(url_for('registro'))
         
         # Validação de CPF (apenas dígitos, 11 caracteres)
         cleaned_cpf = ''.join(filter(str.isdigit, cpf))
         if not (cleaned_cpf.isdigit() and len(cleaned_cpf) == 11):  # Corrigido: == 11 para 11 dígitos exatos
             flash('CPF inválido. Deve conter 11 dígitos.', 'error')
-            return render_template('registro.html')
+            return redirect(url_for('registro'))
 
         # Validação de Telefone (apenas dígitos, 10 ou 11 caracteres)
         cleaned_telefone = ''.join(filter(str.isdigit, telefone))
         if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11):  # Corrigido: <= correto
             flash('Telefone inválido. Deve conter 10 ou 11 dígitos.', 'error')
-            return render_template('registro.html')
+            return redirect(url_for('registro'))
 
         conn = get_db_connection()
         try:
@@ -427,14 +500,76 @@ def registro():
             flash('Email ou CPF já cadastrado. Tente novamente com outros dados.', 'error')
         except Exception as e:
             flash(f'Erro ao registrar usuário: {e}', 'error')
-            logging.error(f'Erro no registro de usuário: {e}')
+            logging.error(f'Erro no registro de usuário: {e}', exc_info=True)
         finally:
             conn.close()
-    return render_template('registro.html')
+    
+    return render_template_string(f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Registro</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                form div {{ margin-bottom: 10px; }}
+                label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+                input[type="text"], input[type="email"], input[type="password"], input[type="tel"] {{
+                    width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px;
+                }}
+                input[type="submit"] {{
+                    background-color: #28a745; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer;
+                }}
+                input[type="submit"]:hover {{ background-color: #218838; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Registro de Usuário</h1>
+                <form method="POST">
+                    <div>
+                        <label for="nome">Nome:</label>
+                        <input type="text" id="nome" name="nome" required>
+                    </div>
+                    <div>
+                        <label for="email">Email:</label>
+                        <input type="email" id="email" name="email" required>
+                    </div>
+                    <div>
+                        <label for="senha">Senha:</label>
+                        <input type="password" id="senha" name="senha" required>
+                    </div>
+                    <div>
+                        <label for="cpf">CPF (apenas números):</label>
+                        <input type="text" id="cpf" name="cpf" required>
+                    </div>
+                    <div>
+                        <label for="telefone">Telefone (apenas números):</label>
+                        <input type="tel" id="telefone" name="telefone" required>
+                    </div>
+                    <input type="submit" value="Registrar">
+                </form>
+                <p>Já tem uma conta? <a href="/login">Faça Login</a></p>
+                <p><a href="/home">Voltar para Home</a></p>
+            </div>
+        </body>
+        </html>
+    ''')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """Rota para login de usuários."""
+    flash_messages = ""
+    for category, message in session.pop('_flashes', []):
+        flash_messages += f'<div class="flash {category}">{message}</div>'
+
     if request.method == 'POST':
         email = request.form['email']
         senha = request.form['senha']
@@ -458,10 +593,56 @@ def login():
                 flash('Email não encontrado.', 'error')
         except Exception as e:
             flash('Erro ao fazer login. Tente novamente.', 'error')
-            logging.error(f'Erro no login: {e}')
+            logging.error(f'Erro no login: {e}', exc_info=True)
         finally:
             conn.close()
-    return render_template('login.html')
+    
+    return render_template_string(f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Login</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 400px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                form div {{ margin-bottom: 10px; }}
+                label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+                input[type="email"], input[type="password"] {{
+                    width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px;
+                }}
+                input[type="submit"] {{
+                    background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer;
+                }}
+                input[type="submit"]:hover {{ background-color: #0056b3; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Login</h1>
+                <form method="POST">
+                    <div>
+                        <label for="email">Email:</label>
+                        <input type="email" id="email" name="email" required>
+                    </div>
+                    <div>
+                        <label for="senha">Senha:</label>
+                        <input type="password" id="senha" name="senha" required>
+                    </div>
+                    <input type="submit" value="Login">
+                </form>
+                <p>Não tem uma conta? <a href="/registro">Registre-se</a></p>
+                <p><a href="/home">Voltar para Home</a></p>
+            </div>
+        </body>
+        </html>
+    ''')
 
 @app.route('/logout')
 def logout():
@@ -489,6 +670,10 @@ def reservar(car_id):
         flash('Este carro não está disponível para reserva no momento.', 'warning')
         return redirect(url_for('home'))
 
+    flash_messages = ""
+    for category, message in session.pop('_flashes', []):
+        flash_messages += f'<div class="flash {category}">{message}</div>'
+
     if request.method == 'POST':
         data_reserva_str = request.form['data_reserva']
         hora_inicio_str = request.form['hora_inicio']
@@ -503,13 +688,13 @@ def reservar(car_id):
             # Validação de data e hora
             if data_reserva < datetime.now().date():
                 flash('Não é possível reservar para uma data passada.', 'error')
-                return render_template('reservar.html', car=car)
+                return redirect(url_for('reservar', car_id=car_id))
             if data_reserva == datetime.now().date() and hora_inicio < datetime.now().time():
                 flash('Não é possível reservar para um horário passado no dia de hoje.', 'error')
-                return render_template('reservar.html', car=car)
+                return redirect(url_for('reservar', car_id=car_id))
             if hora_inicio >= hora_fim:
                 flash('A hora de início deve ser anterior à hora de fim.', 'error')
-                return render_template('reservar.html', car=car)
+                return redirect(url_for('reservar', car_id=car_id))
 
             conn = get_db_connection()
             conn.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, observacoes) VALUES (?, ?, ?, ?, ?, ?)',
@@ -527,9 +712,64 @@ def reservar(car_id):
             flash('Formato de data ou hora inválido.', 'error')
         except Exception as e:
             flash(f'Erro ao realizar reserva: {e}', 'error')
-            logging.error(f'Erro ao realizar reserva: {e}')
+            logging.error(f'Erro ao realizar reserva: {e}', exc_info=True)
     
-    return render_template('reservar.html', car=car)
+    return render_template_string(f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Reservar Carro</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                form div {{ margin-bottom: 10px; }}
+                label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+                input[type="date"], input[type="time"] {{
+                    width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px;
+                }}
+                textarea {{ width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px; min-height: 80px; }}
+                input[type="submit"] {{
+                    background-color: #28a745; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer;
+                }}
+                input[type="submit"]:hover {{ background-color: #218838; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                .flash.warning {{ background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Reservar Carro: {car["modelo"]} ({car["placa"]})</h1>
+                <p>Preço por diária: R$ {car["preco_diaria"]:.2f}</p>
+                <form method="POST">
+                    <div>
+                        <label for="data_reserva">Data da Reserva:</label>
+                        <input type="date" id="data_reserva" name="data_reserva" required>
+                    </div>
+                    <div>
+                        <label for="hora_inicio">Hora de Início:</label>
+                        <input type="time" id="hora_inicio" name="hora_inicio" required>
+                    </div>
+                    <div>
+                        <label for="hora_fim">Hora de Fim:</label>
+                        <input type="time" id="hora_fim" name="hora_fim" required>
+                    </div>
+                    <div>
+                        <label for="observacoes">Observações:</label>
+                        <textarea id="observacoes" name="observacoes"></textarea>
+                    </div>
+                    <input type="submit" value="Confirmar Reserva">
+                </form>
+                <p><a href="/home">Voltar para Home</a></p>
+            </div>
+        </body>
+        </html>
+    ''')
 
 @app.route('/minhas_reservas')
 def minhas_reservas():
@@ -537,6 +777,10 @@ def minhas_reservas():
     if 'user_id' not in session:
         flash('Você precisa estar logado para ver suas reservas.', 'warning')
         return redirect(url_for('login'))
+
+    flash_messages = ""
+    for category, message in session.pop('_flashes', []):
+        flash_messages += f'<div class="flash {category}">{message}</div>'
 
     try:
         conn = get_db_connection()
@@ -555,11 +799,71 @@ def minhas_reservas():
                      ORDER BY r.data_reserva DESC''', (session['user_id'],))
         reservas = c.fetchall()
         conn.close()
-        return render_template('minhas_reservas.html', reservas=reservas)
+
+        html_content = f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Minhas Reservas</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                ul {{ list-style-type: none; padding: 0; }}
+                li {{ background: #eee; margin-bottom: 10px; padding: 10px; border-radius: 4px; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                .flash.warning {{ background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Minhas Reservas</h1>
+        '''
+        if reservas:
+            html_content += '<ul>'
+            for reserva in reservas:
+                html_content += f'''
+                <li>
+                    Carro: <strong>{reserva["carro_modelo"]}</strong><br>
+                    Data: {reserva["data_reserva"]} de {reserva["hora_inicio"]} a {reserva["hora_fim"]}<br>
+                    Status: {reserva["status"]}<br>
+                    Observações: {reserva["observacoes"] or 'Nenhuma'}<br>
+                '''
+                if reserva["status"] == 'pendente':
+                    html_content += f'<a href="/cancelar_reserva/{reserva["id"]}">Cancelar Reserva</a>'
+                html_content += '</li>'
+            html_content += '</ul>'
+        else:
+            html_content += '<p>Você não possui reservas.</p>'
+        
+        html_content += '''
+                <p><a href="/home">Voltar para Home</a></p>
+            </div>
+        </body>
+        </html>
+        '''
+        return render_template_string(html_content)
     except Exception as e:
         flash('Erro ao carregar suas reservas.', 'error')
-        logging.error(f'Erro ao carregar minhas reservas: {e}')
-        return render_template('minhas_reservas.html', reservas=[])
+        logging.error(f'Erro ao carregar minhas reservas: {e}', exc_info=True)
+        return render_template_string(f'''
+            <!DOCTYPE html>
+            <html>
+            <head><title>Erro</title></head>
+            <body>
+                <div class="container">
+                    <h1>Erro</h1>
+                    <p>Ocorreu um erro ao carregar suas reservas. {e}</p>
+                    <a href="/home">Voltar para Home</a>
+                </div>
+            </body>
+            </html>
+        '''), 500
 
 @app.route('/cancelar_reserva/<int:reserva_id>')
 def cancelar_reserva(reserva_id):
@@ -585,7 +889,7 @@ def cancelar_reserva(reserva_id):
         sync_carros_to_sheets() # Sincroniza status do carro
     except Exception as e:
         flash(f'Erro ao cancelar reserva: {e}', 'error')
-        logging.error(f'Erro ao cancelar reserva {reserva_id}: {e}')
+        logging.error(f'Erro ao cancelar reserva {reserva_id}: {e}', exc_info=True)
     finally:
         conn.close()
     return redirect(url_for('minhas_reservas'))
@@ -597,15 +901,199 @@ def admin_panel():
         flash('Acesso negado. Você não tem permissão de administrador.', 'error')
         return redirect(url_for('home'))
     
+    flash_messages = ""
+    for category, message in session.pop('_flashes', []):
+        flash_messages += f'<div class="flash {category}">{message}</div>'
+
     try:
         reservas = get_reservas()
         usuarios = get_usuarios()
         carros = get_all_cars()
-        return render_template('admin.html', reservas=reservas, usuarios=usuarios, carros=carros)
+
+        html_content = f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Painel Admin</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 1000px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1, h2 {{ color: #333; }}
+                table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; }}
+                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+                th {{ background-color: #f2f2f2; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                .flash.info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+                .action-buttons a {{ margin-right: 5px; }}
+                .admin-actions {{ margin-bottom: 20px; }}
+                .admin-actions a {{ margin-right: 10px; background-color: #007bff; color: white; padding: 8px 12px; border-radius: 4px; }}
+                .admin-actions a:hover {{ background-color: #0056b3; }}
+                .sync-button {{ background-color: #28a745; }}
+                .sync-button:hover {{ background-color: #218838; }}
+                .backup-button {{ background-color: #ffc107; color: #333; }}
+                .backup-button:hover {{ background-color: #e0a800; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Painel Administrativo</h1>
+                <p><a href="/home">Voltar para Home</a></p>
+
+                <div class="admin-actions">
+                    <a href="/admin/add_carro">Adicionar Novo Carro</a>
+                    <a href="/admin/sync_sheets" class="sync-button">Sincronizar com Sheets</a>
+                    <a href="/admin/backup_db" class="backup-button">Backup DB</a>
+                    <a href="/admin/restore_backup" class="backup-button">Restaurar DB</a>
+                </div>
+
+                <h2>Carros</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Modelo</th>
+                            <th>Ano</th>
+                            <th>Cor</th>
+                            <th>Placa</th>
+                            <th>Preço Diária</th>
+                            <th>Disponível</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        '''
+        if carros:
+            for car in carros:
+                html_content += f'''
+                        <tr>
+                            <td>{car["id"]}</td>
+                            <td>{car["modelo"]}</td>
+                            <td>{car["ano"]}</td>
+                            <td>{car["cor"]}</td>
+                            <td>{car["placa"]}</td>
+                            <td>R$ {car["preco_diaria"]:.2f}</td>
+                            <td>{'Sim' if car["disponivel"] else 'Não'}</td>
+                            <td class="action-buttons">
+                                <a href="/admin/edit_carro/{car["id"]}">Editar</a>
+                                <a href="/admin/delete_carro/{car["id"]}" onclick="return confirm('Tem certeza que deseja deletar este carro?');">Deletar</a>
+                            </td>
+                        </tr>
+                '''
+        else:
+            html_content += '<tr><td colspan="8">Nenhum carro cadastrado.</td></tr>'
+        html_content += '''
+                    </tbody>
+                </table>
+
+                <h2>Reservas</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Usuário</th>
+                            <th>Carro</th>
+                            <th>Data</th>
+                            <th>Início</th>
+                            <th>Fim</th>
+                            <th>Status</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        '''
+        if reservas:
+            for reserva in reservas:
+                html_content += f'''
+                        <tr>
+                            <td>{reserva["id"]}</td>
+                            <td>{reserva["usuario_nome"]}</td>
+                            <td>{reserva["carro_modelo"]}</td>
+                            <td>{reserva["data_reserva"]}</td>
+                            <td>{reserva["hora_inicio"]}</td>
+                            <td>{reserva["hora_fim"]}</td>
+                            <td>{reserva["status"]}</td>
+                            <td class="action-buttons">
+                '''
+                if reserva["status"] == 'pendente':
+                    html_content += f'<a href="/admin/update_reserva_status/{reserva["id"]}/confirmada">Confirmar</a>'
+                    html_content += f'<a href="/admin/update_reserva_status/{reserva["id"]}/cancelada">Cancelar</a>'
+                elif reserva["status"] == 'confirmada':
+                    html_content += f'<a href="/admin/update_reserva_status/{reserva["id"]}/concluida">Concluir</a>'
+                    html_content += f'<a href="/admin/update_reserva_status/{reserva["id"]}/cancelada">Cancelar</a>'
+                html_content += '''
+                            </td>
+                        </tr>
+                '''
+        else:
+            html_content += '<tr><td colspan="8">Nenhuma reserva encontrada.</td></tr>'
+        html_content += '''
+                    </tbody>
+                </table>
+
+                <h2>Usuários</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Nome</th>
+                            <th>Email</th>
+                            <th>CPF</th>
+                            <th>Telefone</th>
+                            <th>Admin</th>
+                            <th>Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+        '''
+        if usuarios:
+            for user in usuarios:
+                html_content += f'''
+                        <tr>
+                            <td>{user["id"]}</td>
+                            <td>{user["nome"]}</td>
+                            <td>{user["email"]}</td>
+                            <td>{user["cpf"] or 'N/A'}</td>
+                            <td>{user["telefone"] or 'N/A'}</td>
+                            <td>{'Sim' if user["is_admin"] else 'Não'}</td>
+                            <td class="action-buttons">
+                '''
+                if not user["is_admin"]:
+                    html_content += f'<a href="/admin/promote_admin/{user["id"]}" onclick="return confirm(\'Tem certeza que deseja promover este usuário a administrador?\');">Promover Admin</a>'
+                html_content += '''
+                            </td>
+                        </tr>
+                '''
+        else:
+            html_content += '<tr><td colspan="7">Nenhum usuário cadastrado.</td></tr>'
+        html_content += '''
+                    </tbody>
+                </table>
+            </div>
+        </body>
+        </html>
+        '''
+        return render_template_string(html_content)
     except Exception as e:
-        logging.error(f"Erro ao carregar painel admin: {e}")
+        logging.error(f"Erro ao carregar painel admin: {e}", exc_info=True)
         flash('Erro ao carregar dados do painel administrativo.', 'error')
-        return render_template('admin.html', reservas=[], usuarios=[], carros=[])
+        return render_template_string(f'''
+            <!DOCTYPE html>
+            <html>
+            <head><title>Erro Admin</title></head>
+            <body>
+                <div class="container">
+                    <h1>Erro</h1>
+                    <p>Ocorreu um erro ao carregar o painel administrativo. {e}</p>
+                    <a href="/home">Voltar para Home</a>
+                </div>
+            </body>
+            </html>
+        '''), 500
 
 @app.route('/admin/add_carro', methods=['GET', 'POST'])
 def admin_add_carro():
@@ -613,6 +1101,10 @@ def admin_add_carro():
     if not is_admin():
         flash('Acesso negado.', 'error')
         return redirect(url_for('home'))
+
+    flash_messages = ""
+    for category, message in session.pop('_flashes', []):
+        flash_messages += f'<div class="flash {category}">{message}</div>'
 
     if request.method == 'POST':
         modelo = request.form['modelo']
@@ -623,7 +1115,7 @@ def admin_add_carro():
 
         if not modelo or not ano or not cor or not placa or not preco_diaria:
             flash('Todos os campos são obrigatórios.', 'error')
-            return render_template('admin_add_carro.html')
+            return redirect(url_for('admin_add_carro'))
         
         try:
             conn = get_db_connection()
@@ -641,8 +1133,64 @@ def admin_add_carro():
             flash('Preço diária inválido. Use um número.', 'error')
         except Exception as e:
             flash(f'Erro ao adicionar carro: {e}', 'error')
-            logging.error(f'Erro ao adicionar carro: {e}')
-    return render_template('admin_add_carro.html')
+            logging.error(f'Erro ao adicionar carro: {e}', exc_info=True)
+    
+    return render_template_string(f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Adicionar Carro</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                form div {{ margin-bottom: 10px; }}
+                label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+                input[type="text"], input[type="number"] {{
+                    width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px;
+                }}
+                input[type="submit"] {{
+                    background-color: #28a745; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer;
+                }}
+                input[type="submit"]:hover {{ background-color: #218838; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Adicionar Novo Carro</h1>
+                <form method="POST">
+                    <div>
+                        <label for="modelo">Modelo:</label>
+                        <input type="text" id="modelo" name="modelo" required>
+                    </div>
+                    <div>
+                        <label for="ano">Ano:</label>
+                        <input type="number" id="ano" name="ano" required>
+                    </div>
+                    <div>
+                        <label for="cor">Cor:</label>
+                        <input type="text" id="cor" name="cor" required>
+                    </div>
+                    <div>
+                        <label for="placa">Placa:</label>
+                        <input type="text" id="placa" name="placa" required>
+                    </div>
+                    <div>
+                        <label for="preco_diaria">Preço por Diária:</label>
+                        <input type="number" id="preco_diaria" name="preco_diaria" step="0.01" required>
+                    </div>
+                    <input type="submit" value="Adicionar Carro">
+                </form>
+                <p><a href="/admin">Voltar para Painel Admin</a></p>
+            </div>
+        </body>
+        </html>
+    ''')
 
 @app.route('/admin/edit_carro/<int:car_id>', methods=['GET', 'POST'])
 def admin_edit_carro(car_id):
@@ -656,6 +1204,10 @@ def admin_edit_carro(car_id):
         flash('Carro não encontrado.', 'error')
         return redirect(url_for('admin_panel'))
 
+    flash_messages = ""
+    for category, message in session.pop('_flashes', []):
+        flash_messages += f'<div class="flash {category}">{message}</div>'
+
     if request.method == 'POST':
         modelo = request.form['modelo']
         ano = request.form['ano']
@@ -666,7 +1218,7 @@ def admin_edit_carro(car_id):
 
         if not modelo or not ano or not cor or not placa or not preco_diaria:
             flash('Todos os campos são obrigatórios.', 'error')
-            return render_template('admin_edit_carro.html', car=car)
+            return redirect(url_for('admin_edit_carro', car_id=car_id))
         
         try:
             conn = get_db_connection()
@@ -684,8 +1236,69 @@ def admin_edit_carro(car_id):
             flash('Preço diária inválido. Use um número.', 'error')
         except Exception as e:
             flash(f'Erro ao editar carro: {e}', 'error')
-            logging.error(f'Erro ao editar carro {car_id}: {e}')
-    return render_template('admin_edit_carro.html', car=car)
+            logging.error(f'Erro ao editar carro {car_id}: {e}', exc_info=True)
+    
+    return render_template_string(f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Editar Carro</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                form div {{ margin-bottom: 10px; }}
+                label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+                input[type="text"], input[type="number"] {{
+                    width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px;
+                }}
+                input[type="checkbox"] {{ margin-right: 5px; }}
+                input[type="submit"] {{
+                    background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer;
+                }}
+                input[type="submit"]:hover {{ background-color: #0056b3; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Editar Carro: {car["modelo"]}</h1>
+                <form method="POST">
+                    <div>
+                        <label for="modelo">Modelo:</label>
+                        <input type="text" id="modelo" name="modelo" value="{car["modelo"]}" required>
+                    </div>
+                    <div>
+                        <label for="ano">Ano:</label>
+                        <input type="number" id="ano" name="ano" value="{car["ano"]}" required>
+                    </div>
+                    <div>
+                        <label for="cor">Cor:</label>
+                        <input type="text" id="cor" name="cor" value="{car["cor"]}" required>
+                    </div>
+                    <div>
+                        <label for="placa">Placa:</label>
+                        <input type="text" id="placa" name="placa" value="{car["placa"]}" required>
+                    </div>
+                    <div>
+                        <label for="preco_diaria">Preço por Diária:</label>
+                        <input type="number" id="preco_diaria" name="preco_diaria" step="0.01" value="{car["preco_diaria"]}" required>
+                    </div>
+                    <div>
+                        <input type="checkbox" id="disponivel" name="disponivel" {'checked' if car["disponivel"] else ''}>
+                        <label for="disponivel">Disponível</label>
+                    </div>
+                    <input type="submit" value="Atualizar Carro">
+                </form>
+                <p><a href="/admin">Voltar para Painel Admin</a></p>
+            </div>
+        </body>
+        </html>
+    ''')
 
 @app.route('/admin/delete_carro/<int:car_id>')
 def admin_delete_carro(car_id):
@@ -709,7 +1322,7 @@ def admin_delete_carro(car_id):
         sync_carros_to_sheets() # Sincroniza após deletar carro
     except Exception as e:
         flash(f'Erro ao deletar carro: {e}', 'error')
-        logging.error(f'Erro ao deletar carro {car_id}: {e}')
+        logging.error(f'Erro ao deletar carro {car_id}: {e}', exc_info=True)
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -730,7 +1343,7 @@ def admin_update_reserva_status(reserva_id, status):
         sync_reservas_to_sheets() # Sincroniza após atualizar status
     except Exception as e:
         flash(f'Erro ao atualizar status da reserva: {e}', 'error')
-        logging.error(f'Erro ao atualizar status da reserva {reserva_id}: {e}')
+        logging.error(f'Erro ao atualizar status da reserva {reserva_id}: {e}', exc_info=True)
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -751,7 +1364,7 @@ def admin_promote_admin(user_id):
         sync_usuarios_to_sheets() # Sincroniza após promover admin
     except Exception as e:
         flash(f'Erro ao promover usuário a admin: {e}', 'error')
-        logging.error(f'Erro ao promover usuário {user_id} a admin: {e}')
+        logging.error(f'Erro ao promover usuário {user_id} a admin: {e}', exc_info=True)
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -775,7 +1388,7 @@ def admin_sync_sheets():
         logging.info('Todas as abas do Google Sheets sincronizadas.')
     except Exception as e:
         flash(f'Erro geral ao sincronizar com Google Sheets: {e}', 'error')
-        logging.error(f'Erro geral ao sincronizar com Google Sheets: {e}')
+        logging.error(f'Erro geral ao sincronizar com Google Sheets: {e}', exc_info=True)
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin/backup_db')
@@ -819,7 +1432,7 @@ def admin_backup_db():
         return send_file(buffer, as_attachment=True, download_name=f'jgminis_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json', mimetype='application/json')
     except Exception as e:
         flash(f'Erro ao gerar backup do banco de dados: {e}', 'error')
-        logging.error(f'Erro ao gerar backup do DB: {e}')
+        logging.error(f'Erro ao gerar backup do DB: {e}', exc_info=True)
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -831,15 +1444,19 @@ def admin_restore_backup():
         flash('Acesso negado.', 'error')
         return redirect(url_for('home'))
 
+    flash_messages = ""
+    for category, message in session.pop('_flashes', []):
+        flash_messages += f'<div class="flash {category}">{message}</div>'
+
     if request.method == 'POST':
         if 'backup_file' not in request.files:
             flash('Nenhum arquivo de backup selecionado.', 'error')
-            return redirect(url_for('admin_panel'))
+            return redirect(url_for('admin_restore_backup'))
         
         file = request.files['backup_file']
         if file.filename == '':
             flash('Nenhum arquivo de backup selecionado.', 'error')
-            return redirect(url_for('admin_panel'))
+            return redirect(url_for('admin_restore_backup'))
         
         if file and file.filename.endswith('.json'):
             try:
@@ -854,7 +1471,7 @@ def admin_restore_backup():
                     if received_hash != calculated_hash:
                         flash('Erro de integridade do backup: hash não corresponde.', 'error')
                         logging.error('Erro de integridade do backup: hash não corresponde.')
-                        return redirect(url_for('admin_panel'))
+                        return redirect(url_for('admin_restore_backup'))
                 else:
                     logging.warning('Backup sem hash de integridade. Prosseguindo com a restauração.')
 
@@ -897,26 +1514,110 @@ def admin_restore_backup():
                 logging.error(f'Erro: Arquivo de backup inválido (KeyError: {ke}).')
             except Exception as e:
                 flash(f'Erro ao restaurar backup: {e}', 'error')
-                logging.error(f'Erro ao restaurar backup: {e}')
+                logging.error(f'Erro ao restaurar backup: {e}', exc_info=True)
             finally:
                 conn.close()
         else:
             flash('Por favor, selecione um arquivo JSON válido.', 'error')
-    return render_template('admin_restore_backup.html') # Você precisará de um template para esta rota
+    
+    return render_template_string(f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>JG Minis - Restaurar Backup</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }}
+                .container {{ max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #333; }}
+                form div {{ margin-bottom: 10px; }}
+                label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
+                input[type="file"] {{ width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px; }}
+                input[type="submit"] {{
+                    background-color: #dc3545; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer;
+                }}
+                input[type="submit"]:hover {{ background-color: #c82333; }}
+                .flash {{ padding: 10px; margin-bottom: 10px; border-radius: 4px; }}
+                .flash.error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
+                .flash.warning {{ background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                {flash_messages}
+                <h1>Restaurar Backup do Banco de Dados</h1>
+                <p style="color: red; font-weight: bold;">ATENÇÃO: A restauração apagará todos os dados atuais e os substituirá pelos dados do backup!</p>
+                <form method="POST" enctype="multipart/form-data">
+                    <div>
+                        <label for="backup_file">Arquivo de Backup (JSON):</label>
+                        <input type="file" id="backup_file" name="backup_file" accept=".json" required>
+                    </div>
+                    <input type="submit" value="Restaurar Backup">
+                </form>
+                <p><a href="/admin">Voltar para Painel Admin</a></p>
+            </div>
+        </body>
+        </html>
+    ''')
 
 # --- Tratamento de Erros ---
 @app.errorhandler(404)
 def page_not_found(e):
     """Trata erros 404 (Página não encontrada)."""
     logging.warning(f"404 Not Found: {request.url}")
-    return render_template('404.html'), 404
+    return render_template_string(f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>404 - Página Não Encontrada</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; text-align: center; }}
+                .container {{ max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #dc3545; }}
+                p {{ color: #666; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Erro 404</h1>
+                <p>A página que você está procurando não foi encontrada.</p>
+                <p><a href="/home">Voltar para a página inicial</a></p>
+            </div>
+        </body>
+        </html>
+    '''), 404
 
 @app.errorhandler(500)
 def internal_server_error(e):
     """Trata erros 500 (Erro interno do servidor)."""
     logging.error(f"500 Internal Server Error: {e}", exc_info=True)
     flash('Ocorreu um erro inesperado no servidor. Por favor, tente novamente mais tarde.', 'error')
-    return render_template('500.html'), 500
+    return render_template_string(f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>500 - Erro Interno do Servidor</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; text-align: center; }}
+                .container {{ max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                h1 {{ color: #dc3545; }}
+                p {{ color: #666; }}
+                a {{ text-decoration: none; color: #007bff; }}
+                a:hover {{ text-decoration: underline; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Erro 500</h1>
+                <p>Ocorreu um erro interno no servidor. Nossa equipe já foi notificada.</p>
+                <p><a href="/home">Voltar para a página inicial</a></p>
+            </div>
+        </body>
+        </html>
+    '''), 500
 
 # O Gunicorn (servidor de produção) irá chamar a instância 'app' diretamente.
 # Não precisamos do bloco if __name__ == '__main__': app.run() para deploy.
