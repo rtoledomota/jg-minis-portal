@@ -62,7 +62,7 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     if not conn:
-        logging.error('Falha ao obter conexão DB para init_db. Abortando inicialização.')
+        logging.error("Não foi possível obter conexão com o banco de dados para init_db.")
         return
     c = conn.cursor()
     try:
@@ -121,9 +121,7 @@ def init_db():
         if c.fetchone()[0] == 0 and sheet:
             try:
                 records = sheet.get_all_records()
-                # Assuming first row is header, skip it if records has more than 1 row
-                start_row = 1 if len(records) > 0 and 'NOME DA MINIATURA' in records[0] else 0
-                for record in records[start_row:]:
+                for record in records[1:]:  # Skip header
                     service = record.get('NOME DA MINIATURA', '').strip().lower()
                     qty = int(record.get('QUANTIDADE DISPONÍVEL', 0) or 0)
                     if service:
@@ -132,8 +130,6 @@ def init_db():
                 logging.info('Stock inicial sincronizado do Google Sheets (preservando dados existentes)')
             except Exception as e:
                 logging.error(f'Erro no sync inicial de stock: {e}')
-        elif not sheet:
-            logging.warning('Google Sheets não disponível para sync inicial de stock.')
 
         conn.commit()
         logging.info('DB inicializado sem perda de dados - tabelas preservadas')
@@ -143,7 +139,7 @@ def init_db():
     finally:
         conn.close()
 
-# Call init_db() globally to ensure it runs on app startup (Gunicorn)
+# Call init_db() at module level to ensure it runs on Gunicorn startup
 init_db()
 
 # --- 5. Validation Functions ---
@@ -153,7 +149,7 @@ def is_valid_email(email):
 
 def is_valid_phone(phone):
     cleaned = re.sub(r'[^\d]', '', phone)  # Remove non-digits
-    return cleaned.isdigit() and 10 &lt;= len(cleaned) &lt;= 11
+    return cleaned.isdigit() and 10 <= len(cleaned) <= 11 # Corrected syntax
 
 def normalize_service_name(name):
     return name.strip().lower()  # Case-insensitive normalization
@@ -164,15 +160,10 @@ def get_stock(service):
     conn = get_db_connection()
     if not conn: return 0
     c = conn.cursor()
-    try:
-        c.execute('SELECT quantity FROM stock WHERE service = ?', (service_norm,))
-        result = c.fetchone()
-        return result[0] if result else 0
-    except Exception as e:
-        logging.error(f'Erro ao obter stock para {service_norm}: {e}')
-        return 0
-    finally:
-        conn.close()
+    c.execute('SELECT quantity FROM stock WHERE service = ?', (service_norm,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else 0
 
 def update_stock(service, delta):
     service_norm = normalize_service_name(service)
@@ -181,12 +172,12 @@ def update_stock(service, delta):
     c = conn.cursor()
     try:
         c.execute('UPDATE stock SET quantity = quantity + ?, last_sync = CURRENT_TIMESTAMP WHERE service = ?', (delta, service_norm))
-        if c.rowcount == 0: # If service not found, insert it
+        if c.rowcount == 0: # If service not found, insert it (e.g., from admin insert)
             c.execute('INSERT INTO stock (service, quantity, last_sync) VALUES (?, ?, CURRENT_TIMESTAMP)', (service_norm, max(0, delta)))
         conn.commit()
         logging.info(f'Stock atualizado para {service_norm}: delta {delta}')
     except Exception as e:
-        logging.error(f'Erro ao atualizar stock para {service_norm}: {e}')
+        logging.error(f'Erro ao atualizar stock: {e}')
         conn.rollback()
     finally:
         conn.close()
@@ -200,9 +191,7 @@ def sync_stock_from_sheet():
         conn = get_db_connection()
         if not conn: return False
         c = conn.cursor()
-        # Assuming first row is header, skip it if records has more than 1 row
-        start_row = 1 if len(records) > 0 and 'NOME DA MINIATURA' in records[0] else 0
-        for record in records[start_row:]:
+        for record in records[1:]:  # Skip header
             service = normalize_service_name(record.get('NOME DA MINIATURA', ''))
             qty = int(record.get('QUANTIDADE DISPONÍVEL', 0) or 0)
             if service:
@@ -225,11 +214,11 @@ def create_user(name, email, phone, password):
         return False, 'Email inválido.'
     if not is_valid_phone(phone):
         return False, 'Telefone inválido (10-11 dígitos).'
-    if len(password) &lt; 6:
+    if len(password) < 6:
         return False, 'Senha deve ter pelo menos 6 caracteres.'
     
     conn = get_db_connection()
-    if not conn: return False, 'Erro interno no DB.'
+    if not conn: return False, 'Erro interno no banco de dados.'
     c = conn.cursor()
     try:
         # Check if email exists (preserves data)
@@ -243,96 +232,88 @@ def create_user(name, email, phone, password):
                   (name, email, phone, hashed_pw, 'user'))
         conn.commit()
         logging.info(f'Usuário criado: {email}')
+        conn.close()
         return True, 'Cadastro realizado com sucesso!'
     except Exception as e:
         logging.error(f'Erro ao criar usuário: {e}')
         conn.rollback()
-        return False, 'Erro interno no cadastro. Tente novamente.'
-    finally:
         conn.close()
+        return False, 'Erro interno no cadastro. Tente novamente.'
 
 def authenticate_user(email, password):
     conn = get_db_connection()
     if not conn: return False
     c = conn.cursor()
-    try:
-        c.execute('SELECT id, name, password, role FROM users WHERE email = ?', (email,))
-        user = c.fetchone()
-        if user and check_password_hash(user['password'], password):
-            session['user_id'] = user['id']
-            session['user_name'] = user['name']
-            session['role'] = user['role']
-            logging.info(f'Login bem-sucedido: {email}')
-            return True
-        logging.warning(f'Falha no login: {email}')
-        return False
-    except Exception as e:
-        logging.error(f'Erro na autenticação: {e}')
-        return False
-    finally:
-        conn.close()
+    c.execute('SELECT id, name, password, role FROM users WHERE email = ?', (email,))
+    user = c.fetchone()
+    conn.close()
+    if user and check_password_hash(user['password'], password):
+        session['user_id'] = user['id']
+        session['user_name'] = user['name']
+        session['role'] = user['role']
+        logging.info(f'Login bem-sucedido: {email}')
+        return True
+    logging.warning(f'Falha no login: {email}')
+    return False
 
 def get_user_by_id(user_id):
     conn = get_db_connection()
     if not conn: return None
     c = conn.cursor()
-    try:
-        c.execute('SELECT * FROM users WHERE id = ?', (user_id,))
-        user = c.fetchone()
-        return user
-    except Exception as e:
-        logging.error(f'Erro ao obter usuário {user_id}: {e}')
-        return None
-    finally:
-        conn.close()
+    c.execute('SELECT * FROM users WHERE id = ?', (user_id,))
+    user = c.fetchone()
+    conn.close()
+    return user
 
 def promote_to_admin(user_id):
     conn = get_db_connection()
-    if not conn: return False, 'Erro interno no DB.'
+    if not conn: return False, 'Erro interno no banco de dados.'
     c = conn.cursor()
     try:
         # Verify user exists first
         c.execute('SELECT id FROM users WHERE id = ?', (user_id,))
         if not c.fetchone():
+            conn.close()
             return False, 'Usuário não encontrado.'
         
         c.execute('UPDATE users SET role = "admin" WHERE id = ?', (user_id,))
         if c.rowcount > 0:
             conn.commit()
             logging.info(f'Usuário {user_id} promovido a admin')
+            conn.close()
             return True, 'Usuário promovido a admin com sucesso!'
         else:
+            conn.close()
             return False, 'Erro ao promover usuário.'
     except Exception as e:
         logging.error(f'Erro ao promover admin: {e}')
         conn.rollback()
-        return False, 'Erro interno na promoção.'
-    finally:
         conn.close()
+        return False, 'Erro interno na promoção.'
 
 # --- 8. Reservation Management ---
 def create_reservation(user_id, service, quantity=1):
     service_norm = normalize_service_name(service)
     stock = get_stock(service_norm)
-    if stock &lt; quantity:
+    if stock < quantity:
         # Add to waiting list instead
         conn = get_db_connection()
-        if not conn: return False, 'Erro interno no DB.'
+        if not conn: return False, 'Erro interno no banco de dados.'
         c = conn.cursor()
         try:
-            c.execute('INSERT OR IGNORE INTO waiting_list (user_id, service) VALUES (?, ?)', (user_id, service_norm))
+            c.execute('INSERT INTO waiting_list (user_id, service) VALUES (?, ?)', (user_id, service_norm))
             conn.commit()
             logging.info(f'Usuário {user_id} adicionado à fila para {service_norm}')
+            conn.close()
             return False, f'Estoque insuficiente ({stock} disponível). Você foi adicionado à fila de espera!'
         except Exception as e:
             logging.error(f'Erro na fila de espera: {e}')
             conn.rollback()
-            return False, 'Erro ao adicionar à fila de espera.'
-        finally:
             conn.close()
+            return False, 'Erro ao adicionar à fila de espera.'
     
     conn = get_db_connection()
-    if not conn: return False, 'Erro interno no DB.'
+    if not conn: return False, 'Erro interno no banco de dados.'
     c = conn.cursor()
     try:
         c.execute('INSERT INTO reservations (user_id, service, quantity, status) VALUES (?, ?, ?, ?)', 
@@ -342,18 +323,18 @@ def create_reservation(user_id, service, quantity=1):
         update_stock(service_norm, -quantity)
         conn.commit()
         logging.info(f'Reserva criada: ID {reservation_id} para {service_norm}, qty {quantity}')
+        conn.close()
         return True, f'Reserva #{reservation_id} criada com sucesso para {quantity} unidade(s)!'
     except Exception as e:
         logging.error(f'Erro ao criar reserva: {e}')
         conn.rollback()
+        conn.close()
         # Revert stock if needed (but since insert failed, no need)
         return False, 'Erro interno na reserva. Tente novamente.'
-    finally:
-        conn.close()
 
 def confirm_reservation(reservation_id, admin_id):
     conn = get_db_connection()
-    if not conn: return False, 'Erro interno no DB.'
+    if not conn: return False, 'Erro interno no banco de dados.'
     c = conn.cursor()
     try:
         c.execute('UPDATE reservations SET status = "confirmed", approved_by = ? WHERE id = ? AND status = "pending"', 
@@ -361,19 +342,20 @@ def confirm_reservation(reservation_id, admin_id):
         if c.rowcount > 0:
             conn.commit()
             logging.info(f'Reserva {reservation_id} confirmada por admin {admin_id}')
+            conn.close()
             return True, 'Reserva confirmada!'
         else:
+            conn.close()
             return False, 'Reserva não encontrada ou já processada.'
     except Exception as e:
         logging.error(f'Erro ao confirmar reserva: {e}')
         conn.rollback()
-        return False, 'Erro interno na confirmação.'
-    finally:
         conn.close()
+        return False, 'Erro interno na confirmação.'
 
 def reject_reservation(reservation_id, admin_id, reason):
     conn = get_db_connection()
-    if not conn: return False, 'Erro interno no DB.'
+    if not conn: return False, 'Erro interno no banco de dados.'
     c = conn.cursor()
     try:
         c.execute('UPDATE reservations SET status = "rejected", approved_by = ?, denied_reason = ? WHERE id = ? AND status = "pending"', 
@@ -386,85 +368,31 @@ def reject_reservation(reservation_id, admin_id, reason):
                 update_stock(res['service'], res['quantity'])
             conn.commit()
             logging.info(f'Reserva {reservation_id} rejeitada por admin {admin_id}: {reason}')
+            conn.close()
             return True, 'Reserva rejeitada e estoque revertido!'
         else:
+            conn.close()
             return False, 'Reserva não encontrada ou já processada.'
     except Exception as e:
         logging.error(f'Erro ao rejeitar reserva: {e}')
         conn.rollback()
-        return False, 'Erro interno na rejeição.'
-    finally:
         conn.close()
+        return False, 'Erro interno na rejeição.'
 
 # --- 9. Get All Data for Home/Admin ---
-def get_all_minis_data_for_display():
+def get_all_minis():
     conn = get_db_connection()
-    if not conn: return []
-    c = conn.cursor()
-    thumbnails = []
+    if not conn:
+        logging.error('Falha na conexão DB para minis')
+        return []  # Fallback vazio para evitar crash
     try:
-        # Get stock quantities from DB (service in lower case)
-        c.execute("SELECT service, quantity FROM stock ORDER BY service")
-        stock_data = {row['service']: row['quantity'] for row in c.fetchall()}
-        
-        # Get other details from Google Sheet
-        if sheet:
-            records = sheet.get_all_records()
-            if not records:
-                logging.warning("Planilha vazia - thumbnails fallback")
-                return [{'service': 'Fallback', 'quantity': 0, 'image': LOGO_URL, 'price': '0,00', 'obs': 'Adicione dados na planilha', 'marca': '', 'previsao': ''}]
-            
-            # Assuming first row is header, skip it if records has more than 1 row
-            start_row = 1 if len(records) > 0 and 'NOME DA MINIATURA' in records[0] else 0
-            for record in records[start_row:]:
-                service_raw = record.get('NOME DA MINIATURA', '').strip()
-                if not service_raw: continue
-                
-                service_lower = normalize_service_name(service_raw)
-                
-                marca = record.get('MARCA/FABRICANTE', '')
-                obs = record.get('OBSERVAÇÕES', '')
-                image = record.get('IMAGEM', LOGO_URL)
-                price_raw = record.get('VALOR', 0)
-                previsao = record.get('PREVISÃO DE CHEGADA', '')
-                
-                price_str = str(price_raw) if price_raw is not None else '0'
-                price = price_str.replace('R$ ', '').replace(',', '.')
-                try:
-                    price = float(price)
-                except ValueError:
-                    price = 0.0
-                
-                quantity = stock_data.get(service_lower, 0) 
-                
-                thumbnails.append({
-                    'service': service_raw,
-                    'marca': marca,
-                    'obs': obs,
-                    'image': image,
-                    'price': f"{price:.2f}".replace('.', ','),
-                    'quantity': quantity,
-                    'previsao': previsao
-                })
-            logging.info(f'Carregados {len(thumbnails)} thumbnails da planilha')
-        else:
-            # Fallback thumbnails if no sheet
-            for service_name, qty in stock_data.items():
-                thumbnails.append({
-                    'service': service_name.title(),
-                    'marca': 'N/A',
-                    'obs': 'Dados do DB',
-                    'image': LOGO_URL,
-                    'price': '0,00',
-                    'quantity': qty,
-                    'previsao': 'N/A'
-                })
-            logging.warning('Usando fallback thumbnails - Google Sheets não disponível')
-        
-        return thumbnails
+        c = conn.cursor()
+        c.execute('SELECT service, quantity FROM stock ORDER BY service')
+        minis = c.fetchall()
+        return minis
     except Exception as e:
-        logging.error(f'Erro ao carregar thumbnails: {e}')
-        return [{'service': 'Erro de Carregamento', 'quantity': 0, 'image': LOGO_URL, 'price': '0,00', 'obs': str(e), 'marca': '', 'previsao': ''}]
+        logging.error(f'Erro ao carregar minis: {e}')
+        return []  # Evita 502 na home
     finally:
         conn.close()
 
@@ -474,7 +402,7 @@ def get_all_reservations():
     c = conn.cursor()
     try:
         c.execute('''
-            SELECT r.id, r.service, r.quantity, r.status, r.created_at, u.name as user_name, a.name as admin_name, r.denied_reason
+            SELECT r.id, r.service, r.quantity, r.status, r.created_at, u.name as user_name, a.name as admin_name
             FROM reservations r
             JOIN users u ON r.user_id = u.id
             LEFT JOIN users a ON r.approved_by = a.id
@@ -483,7 +411,7 @@ def get_all_reservations():
         reservations = c.fetchall()
         return reservations
     except Exception as e:
-        logging.error(f'Erro ao obter reservas: {e}')
+        logging.error(f'Erro ao carregar reservas: {e}')
         return []
     finally:
         conn.close()
@@ -497,7 +425,7 @@ def get_all_users():
         users = c.fetchall()
         return users
     except Exception as e:
-        logging.error(f'Erro ao obter usuários: {e}')
+        logging.error(f'Erro ao carregar usuários: {e}')
         return []
     finally:
         conn.close()
@@ -516,7 +444,7 @@ def get_waiting_list():
         waiting = c.fetchall()
         return waiting
     except Exception as e:
-        logging.error(f'Erro ao obter fila de espera: {e}')
+        logging.error(f'Erro ao carregar fila de espera: {e}')
         return []
     finally:
         conn.close()
@@ -530,96 +458,70 @@ HOME_TEMPLATE = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JG Minis Portal de Reservas</title>
     <style>
-        body { font-family: 'Arial', sans-serif; margin: 0; padding: 0; background-color: #f4f4f4; color: #333; }
-        header { background-color: #004085; color: white; padding: 15px 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        header img { height: 60px; vertical-align: middle; margin-right: 15px; }
-        header h1 { display: inline-block; margin: 0; font-size: 2em; }
-        nav { background-color: #e9ecef; padding: 10px 20px; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-        nav a { color: #007bff; text-decoration: none; margin: 0 15px; font-weight: bold; font-size: 1.2em; transition: color 0.3s; }
-        nav a:hover { color: #0056b3; text-decoration: underline; }
-        .flash-messages { padding: 10px 20px; margin-top: 10px; text-align: center; }
-        .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .grid-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 25px; padding: 25px; max-width: 1200px; margin: 20px auto; }
-        .thumbnail { background-color: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); overflow: hidden; text-align: center; transition: transform 0.3s ease, box-shadow 0.3s ease; position: relative; }
-        .thumbnail:hover { transform: translateY(-5px); box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
-        .thumbnail img { width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid #eee; }
-        .thumbnail.esgotado { opacity: 0.7; filter: grayscale(100%); }
-        .esgotado-tag { position: absolute; top: 10px; right: 10px; background-color: #dc3545; color: white; padding: 5px 10px; border-radius: 20px; font-size: 0.8em; font-weight: bold; z-index: 10; }
-        .thumbnail-content { padding: 15px; }
-        .thumbnail h3 { font-size: 1.3em; color: #007bff; margin-top: 0; margin-bottom: 8px; }
-        .thumbnail p { font-size: 0.95em; color: #555; margin-bottom: 5px; line-height: 1.4; }
-        .thumbnail .price { font-size: 1.1em; font-weight: bold; color: #28a745; margin-top: 10px; }
-        .thumbnail .quantity { font-size: 0.9em; color: #6c757d; margin-bottom: 15px; }
-        .action-buttons { display: flex; justify-content: center; gap: 10px; margin-top: 15px; flex-wrap: wrap; }
-        .btn { display: inline-block; padding: 10px 18px; border-radius: 5px; text-decoration: none; font-weight: bold; transition: background-color 0.3s ease, color 0.3s ease; }
-        .btn-reserve { background-color: #007bff; color: white; border: none; }
-        .btn-reserve:hover { background-color: #0056b3; }
-        .btn-waiting { background-color: #ffc107; color: #212529; border: none; } /* Amarelo */
-        .btn-waiting:hover { background-color: #e0a800; }
-        .btn-contact { background-color: #25D366; color: white; border: none; } /* Verde WhatsApp */
-        .btn-contact:hover { background-color: #1DA851; }
-        footer { background-color: #343a40; color: white; text-align: center; padding: 15px 20px; margin-top: 40px; font-size: 0.9em; }
-        @media (max-width: 768px) {
-            header h1 { font-size: 1.8em; }
-            nav a { margin: 0 10px; }
-            .grid-container { grid-template-columns: 1fr; padding: 15px; }
-            .thumbnail img { height: 150px; }
-            .action-buttons { flex-direction: column; }
-        }
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f4f4f4; color: #333; }
+        header { text-align: center; margin-bottom: 30px; }
+        .logo { max-width: 200px; height: auto; }
+        h1 { color: #333; font-size: 2em; }
+        .mini-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; }
+        .mini-card { background: white; border-radius: 10px; padding: 15px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); text-align: center; }
+        .mini-card.esgotado { opacity: 0.6; filter: grayscale(100%); }
+        .mini-card.esgotado .btn-reservar { background: #ccc; cursor: not-allowed; }
+        .mini-name { font-weight: bold; margin-bottom: 10px; color: #333 !important; }
+        .stock { color: #28a745; font-weight: bold; }
+        .btn { display: inline-block; padding: 10px 15px; margin: 5px; text-decoration: none; border-radius: 5px; color: white; }
+        .btn-reservar { background: #007bff; }
+        .btn-fila { background: #ffc107; color: #000; }
+        .btn-contato { background: #28a745; }
+        .btn-logout { background: #dc3545; float: right; }
+        nav { margin-bottom: 20px; }
+        nav a { margin: 0 10px; font-size: 1.2em; text-decoration: none; color: #333; }
+        .flash { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .flash.success { background: #d4edda; color: #155724; }
+        .flash.error { background: #f8d7da; color: #721c24; }
     </style>
 </head>
 <body>
     <header>
-        <img src="{{ logo_url }}" alt="Logo JG MINIS">
+        <img src="{{ logo_url }}" alt="JG Minis Logo" class="logo">
         <h1>JG Minis Portal de Reservas</h1>
     </header>
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
-            <div class="flash-messages">
             {% for category, message in messages %}
-                <div class="flash-{{ category }}">{{ message }}</div>
+                <div class="flash {{ category }}">{{ message }}</div>
             {% endfor %}
-            </div>
         {% endif %}
     {% endwith %}
-    <nav>
-        <a href="/">Home</a>
-        {% if session.get('user_id') %}
+    {% if session.get('user_id') %}
+        <nav>
+            <a href="/">Home</a>
             {% if session.get('role') == 'admin' %}
                 <a href="/admin">Admin</a>
             {% endif %}
-            <a href="/logout" style="float: right;">Logout ({{ session.get('user_name', 'Usuário') }})</a>
-        {% else %}
+            <a href="/logout" class="btn btn-logout">Logout</a>
+        </nav>
+        <p>Bem-vindo, {{ session.get('user_name') }}!</p>
+    {% else %}
+        <nav>
             <a href="/login">Login</a>
             <a href="/register">Cadastro</a>
-        {% endif %}
-    </nav>
-    <div class="grid-container">
-        {% for thumb in thumbnails %}
-            <div class="thumbnail {% if thumb.quantity == 0 %}esgotado{% endif %}">
-                <img src="{{ thumb.image }}" alt="{{ thumb.service }}">
-                {% if thumb.quantity == 0 %}<div class="esgotado-tag">ESGOTADO</div>{% endif %}
-                <div class="thumbnail-content">
-                    <h3>{{ thumb.service }}</h3>
-                    <p>{{ thumb.marca }} - {{ thumb.obs }}</p>
-                    <p class="price">R$ {{ thumb.price }}</p>
-                    <p class="quantity">Disponível: {{ thumb.quantity }}</p>
-                    <div class="action-buttons">
-                        {% if thumb.quantity == 0 %}
-                            <a href="/waiting/{{ thumb.service }}" class="btn btn-waiting">Fila de Espera</a>
-                            <a href="https://wa.me/{{ whatsapp_number }}?text=Olá, gostaria de saber sobre a fila de espera para {{ thumb.service }}. Meu email: {{ session.get('user_name', 'anônimo') }} ({{ session.get('user_email', 'sem email') }})" class="btn btn-contact">Entrar em Contato</a>
-                        {% else %}
-                            <a href="/reserve/{{ thumb.service }}" class="btn btn-reserve">Reservar Agora</a>
-                        {% endif %}
-                    </div>
-                </div>
+        </nav>
+    {% endif %}
+    <div class="mini-container">
+        {% for mini in minis %}
+            <div class="mini-card {% if mini['quantity'] == 0 %}esgotado{% endif %}">
+                <div class="mini-name">{{ mini['service'].title() }}</div>
+                <div class="stock">Estoque: {{ mini['quantity'] }}</div>
+                {% if mini['quantity'] > 0 %}
+                    <a href="/reserve/{{ mini['service'] }}" class="btn btn-reservar">Reservar Agora</a>
+                {% else %}
+                    <a href="/waiting/{{ mini['service'] }}" class="btn btn-fila">Fila de Espera</a>
+                    <a href="https://wa.me/{{ whatsapp_number }}" class="btn btn-contato">Entrar em Contato</a>
+                    <p>ESGOTADO</p>
+                {% endif %}
             </div>
         {% endfor %}
     </div>
-    <footer>
-        <p>&copy; 2025 JG Minis Portal de Reservas. Todos os direitos reservados.</p>
-    </footer>
 </body>
 </html>
 '''
@@ -633,46 +535,32 @@ RESERVE_TEMPLATE = '''
     <title>Reservar {{ service.title() }} - JG Minis</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; background: #f4f4f4; color: #333; }
-        h1 { color: #333; text-align: center; margin-bottom: 20px; }
-        .flash-messages { padding: 10px 0; text-align: center; }
-        .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .mini-details { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); text-align: center; }
-        .mini-details img { max-width: 80%; height: auto; border-radius: 5px; margin-bottom: 15px; }
-        .mini-details p { margin: 5px 0; font-size: 1.1em; }
-        .mini-details .price { font-weight: bold; color: #28a745; }
-        form { margin-top: 20px; }
-        label { display: block; margin: 10px 0 5px; font-weight: bold; color: #333; }
-        select { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 5px; }
-        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: background-color 0.3s ease; }
-        .btn:hover { background-color: #0056b3; }
-        .back-link { display: block; text-align: center; margin-top: 20px; color: #007bff; text-decoration: none; }
-        .back-link:hover { text-decoration: underline; }
+        h1 { color: #333; }
+        form { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        label { display: block; margin: 10px 0 5px; font-weight: bold; color: #333 !important; }
+        input, select { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
+        .flash { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .flash.success { background: #d4edda; color: #155724; }
+        .flash.error { background: #f8d7da; color: #721c24; }
+        img { max-width: 100%; height: auto; margin: 20px 0; } /* Imagem na reserva */
     </style>
 </head>
 <body>
     <h1>Reservar {{ service.title() }}</h1>
+    <img src="{{ logo_url }}" alt="{{ service.title() }}" style="max-width: 200px;"> <!-- Usando LOGO_URL como placeholder -->
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
-            <div class="flash-messages">
             {% for category, message in messages %}
-                <div class="flash-{{ category }}">{{ message }}</div>
+                <div class="flash {{ category }}">{{ message }}</div>
             {% endfor %}
-            </div>
         {% endif %}
     {% endwith %}
-    <div class="mini-details">
-        <img src="{{ image_url }}" alt="{{ service.title() }}">
-        <p><strong>Marca:</strong> {{ marca }}</p>
-        <p><strong>Observações:</strong> {{ obs }}</p>
-        <p class="price"><strong>Preço:</strong> R$ {{ price }}</p>
-        <p><strong>Disponível:</strong> {{ stock }} unidade(s)</p>
-    </div>
     {% if not session.get('user_id') %}
-        <p style="text-align: center; margin-top: 20px;">Faça <a href="/login">login</a> para reservar.</p>
+        <p>Faça <a href="/login">login</a> para reservar.</p>
     {% else %}
         <form method="POST">
-            <label for="quantity">Quantidade:</label>
+            <label for="quantity">Quantidade (máx. {{ stock }}):</label>
             <select name="quantity" id="quantity">
                 {% for q in range(1, stock + 1) %}
                     <option value="{{ q }}">{{ q }}</option>
@@ -680,7 +568,7 @@ RESERVE_TEMPLATE = '''
             </select>
             <button type="submit" class="btn">Confirmar Reserva</button>
         </form>
-        <a href="/" class="back-link">Voltar à Home</a>
+        <a href="/">Voltar à Home</a>
     {% endif %}
 </body>
 </html>
@@ -694,134 +582,111 @@ ADMIN_TEMPLATE = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin - JG Minis</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f4; color: #333; }
-        h1, h2 { color: #333; margin-top: 25px; margin-bottom: 15px; }
-        .flash-messages { padding: 10px 0; text-align: center; }
-        .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        table { width: 100%; border-collapse: collapse; margin: 20px 0; background: white; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }
-        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; color: #333; }
-        th { background: #e9ecef; font-weight: bold; }
-        .btn { display: inline-block; padding: 8px 12px; margin: 4px; border-radius: 5px; text-decoration: none; font-weight: bold; transition: background-color 0.3s ease; border: none; cursor: pointer; color: white; }
-        .btn-home { background: #007bff; } .btn-home:hover { background: #0056b3; }
-        .btn-logout { background: #dc3545; } .btn-logout:hover { background: #c82333; }
-        .btn-confirm { background: #28a745; } .btn-confirm:hover { background: #218838; }
-        .btn-reject { background: #dc3545; } .btn-reject:hover { background: #c82333; }
-        .btn-promote { background: #ffc107; color: #212529; } .btn-promote:hover { background: #e0a800; }
-        .btn-sync { background: #17a2b8; } .btn-sync:hover { background: #138496; }
-        .btn-backup { background: #6c757d; } .btn-backup:hover { background: #5a6268; }
-        .btn-insert { background: #007bff; } .btn-insert:hover { background: #0056b3; }
-        form { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-        input[type="text"], input[type="number"], select, textarea { width: calc(100% - 22px); padding: 10px; margin: 8px 0; border: 1px solid #ddd; border-radius: 5px; }
-        button[type="submit"] { padding: 10px 15px; border-radius: 5px; border: none; background: #007bff; color: white; cursor: pointer; font-weight: bold; }
-        .action-form { display: inline-block; margin: 0; }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f4; color: #333 !important; } /* Texto visível: cor #333 */
+        h1, h2 { color: #333 !important; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; background: white; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; color: #333 !important; } /* Texto visível em tabelas */
+        th { background: #f8f9fa; }
+        .btn { padding: 5px 10px; margin: 2px; border-radius: 3px; text-decoration: none; color: white; }
+        .btn-confirm { background: #28a745; }
+        .btn-reject { background: #dc3545; }
+        .btn-promote { background: #ffc107; color: #000; }
+        .btn-sync { background: #007bff; }
+        .flash { padding: 10px; margin: 10px 0; border-radius: 5px; color: #333 !important; }
+        .flash.success { background: #d4edda; }
+        .flash.error { background: #f8d7da; }
+        form { background: white; padding: 15px; border-radius: 5px; margin: 10px 0; }
+        input, select, textarea { width: 100%; padding: 5px; margin: 5px 0; }
     </style>
 </head>
 <body>
     <h1>Painel Admin - JG Minis</h1>
-    <a href="/" class="btn btn-home">Home</a> 
-    <a href="/logout" class="btn btn-logout">Logout ({{ session.get('user_name', 'Admin') }})</a>
-
+    <a href="/" class="btn">Home</a> <a href="/logout" class="btn" style="background: #dc3545;">Logout</a>
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
-            <div class="flash-messages">
             {% for category, message in messages %}
-                <div class="flash-{{ category }}">{{ message }}</div>
+                <div class="flash {{ category }}">{{ message }}</div>
             {% endfor %}
-            </div>
         {% endif %}
     {% endwith %}
 
     <h2>Gerenciar Usuários</h2>
     <table>
-        <thead>
-            <tr><th>ID</th><th>Nome</th><th>Email</th><th>Telefone</th><th>Role</th><th>Data Cadastro</th><th>Ações</th></tr>
-        </thead>
-        <tbody>
-            {% for user in users %}
-                <tr>
-                    <td>{{ user['id'] }}</td>
-                    <td>{{ user['name'] }}</td>
-                    <td>{{ user['email'] }}</td>
-                    <td>{{ user['phone'] }}</td>
-                    <td>{{ user['role'] }}</td>
-                    <td>{{ user['data_cadastro'] }}</td>
-                    <td>
-                        {% if user['role'] != 'admin' %}
-                            <a href="/admin/promote/{{ user['id'] }}" class="btn btn-promote">Promover Admin</a>
-                        {% endif %}
-                    </td>
-                </tr>
-            {% endfor %}
-        </tbody>
+        <tr><th>ID</th><th>Nome</th><th>Email</th><th>Telefone</th><th>Role</th><th>Data Cadastro</th><th>Ações</th></tr>
+        {% for user in users %}
+            <tr>
+                <td>{{ user['id'] }}</td>
+                <td style="color: #333 !important;">{{ user['name'] }}</td>
+                <td style="color: #333 !important;">{{ user['email'] }}</td>
+                <td style="color: #333 !important;">{{ user['phone'] }}</td>
+                <td>{{ user['role'] }}</td>
+                <td>{{ user['data_cadastro'] }}</td>
+                <td>
+                    {% if user['role'] != 'admin' %}
+                        <a href="/admin/promote/{{ user['id'] }}" class="btn btn-promote">Promover Admin</a>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
     </table>
 
     <h2>Gerenciar Reservas</h2>
     <table>
-        <thead>
-            <tr><th>ID</th><th>Serviço</th><th>Usuário</th><th>Quantidade</th><th>Status</th><th>Data</th><th>Razão Rejeição</th><th>Ações</th></tr>
-        </thead>
-        <tbody>
-            {% for res in reservations %}
-                <tr>
-                    <td>{{ res['id'] }}</td>
-                    <td>{{ res['service'].title() }}</td>
-                    <td>{{ res['user_name'] }}</td>
-                    <td>{{ res['quantity'] }}</td>
-                    <td>{{ res['status'] }}</td>
-                    <td>{{ res['created_at'] }}</td>
-                    <td>{{ res['denied_reason'] if res['denied_reason'] else 'N/A' }}</td>
-                    <td>
-                        {% if res['status'] == 'pending' %}
-                            <a href="/admin/confirm/{{ res['id'] }}" class="btn btn-confirm">Confirmar Reserva</a>
-                            <form method="POST" action="/admin/reject/{{ res['id'] }}" class="action-form">
-                                <input type="text" name="reason" placeholder="Motivo da rejeição" required style="width: auto; margin-right: 5px;">
-                                <button type="submit" class="btn btn-reject">Rejeitar Reserva</button>
-                            </form>
-                        {% endif %}
-                    </td>
-                </tr>
-            {% endfor %}
-        </tbody>
+        <tr><th>ID</th><th>Serviço</th><th>Usuário</th><th>Quantidade</th><th>Status</th><th>Data</th><th>Ações</th></tr>
+        {% for res in reservations %}
+            <tr>
+                <td>{{ res['id'] }}</td>
+                <td style="color: #333 !important;">{{ res['service'].title() }}</td>
+                <td style="color: #333 !important;">{{ res['user_name'] }}</td>
+                <td>{{ res['quantity'] }}</td>
+                <td>{{ res['status'] }}</td>
+                <td>{{ res['created_at'] }}</td>
+                <td>
+                    {% if res['status'] == 'pending' %}
+                        <a href="/admin/confirm/{{ res['id'] }}" class="btn btn-confirm">Confirmar Reserva</a>
+                        <form method="POST" action="/admin/reject/{{ res['id'] }}" style="display: inline;">
+                            <input type="text" name="reason" placeholder="Motivo da rejeição" required>
+                            <button type="submit" class="btn btn-reject">Rejeitar Reserva</button>
+                        </form>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
     </table>
 
     <h2>Fila de Espera</h2>
     <table>
-        <thead>
-            <tr><th>ID</th><th>Serviço</th><th>Usuário</th><th>Data</th></tr>
-        </thead>
-        <tbody>
-            {% for wait in waiting %}
-                <tr>
-                    <td>{{ wait['id'] }}</td>
-                    <td>{{ wait['service'].title() }}</td>
-                    <td>{{ wait['user_name'] }}</td>
-                    <td>{{ wait['created_at'] }}</td>
-                </tr>
-            {% endfor %}
-        </tbody>
+        <tr><th>ID</th><th>Serviço</th><th>Usuário</th><th>Data</th></tr>
+        {% for wait in waiting %}
+            <tr>
+                <td>{{ wait['id'] }}</td>
+                <td style="color: #333 !important;">{{ wait['service'].title() }}</td>
+                <td style="color: #333 !important;">{{ wait['user_name'] }}</td>
+                <td>{{ wait['created_at'] }}</td>
+            </tr>
+        {% endfor %}
     </table>
 
     <h2>Ações Admin</h2>
-    <form method="POST" action="/admin/sync" class="action-form">
-        <button type="submit" class="btn btn-sync">Sincronizar Stock (Google Sheets)</button>
+    <form method="POST" action="/admin/sync">
+        <button type="submit" class="btn btn-sync">Sincronizar Stock</button>
     </form>
-    <a href="/admin/backup/json" class="btn btn-backup">Backup JSON</a>
-    <a href="/admin/backup/csv" class="btn btn-backup">Backup CSV</a>
+    <a href="/admin/backup/json" class="btn">Backup JSON</a>
+    <a href="/admin/backup/csv" class="btn">Backup CSV</a>
 
     <h2>Inserir Nova Miniatura/Estoque</h2>
     <form method="POST" action="/admin/insert_mini">
         <input type="text" name="service" placeholder="Nome da Miniatura" required>
         <input type="number" name="quantity" placeholder="Quantidade" required>
-        <button type="submit" class="btn btn-insert">Inserir/Atualizar</button>
+        <button type="submit" class="btn">Inserir</button>
     </form>
 
     <h2>Inserir Nova Reserva (Teste)</h2>
     <form method="POST" action="/admin/insert_reservation">
         <input type="number" name="user_id" placeholder="ID Usuário" required>
-        <input type="text" name="service" placeholder="Nome da Miniatura" required>
+        <input type="text" name="service" placeholder="Serviço" required>
         <input type="number" name="quantity" value="1" required>
-        <button type="submit" class="btn btn-insert">Inserir Reserva</button>
+        <button type="submit" class="btn">Inserir Reserva</button>
     </form>
 </body>
 </html>
@@ -836,27 +701,20 @@ LOGIN_TEMPLATE = '''
     <title>Login - JG Minis</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 400px; margin: 100px auto; padding: 20px; background: #f4f4f4; color: #333; }
-        h2 { text-align: center; color: #333; margin-bottom: 20px; }
         form { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        input { width: calc(100% - 22px); padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
-        .btn { background: #007bff; color: white; padding: 10px; width: 100%; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: background-color 0.3s ease; }
-        .btn:hover { background-color: #0056b3; }
-        .flash-messages { padding: 10px 0; text-align: center; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        p { text-align: center; margin-top: 15px; }
-        p a { color: #007bff; text-decoration: none; }
-        p a:hover { text-decoration: underline; }
+        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
+        .btn { background: #007bff; color: white; padding: 10px; width: 100%; border: none; border-radius: 5px; cursor: pointer; }
+        .flash { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .flash.error { background: #f8d7da; color: #721c24; }
     </style>
 </head>
 <body>
     <h2>Login</h2>
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
-            <div class="flash-messages">
             {% for category, message in messages %}
-                <div class="flash-{{ category }}">{{ message }}</div>
+                <div class="flash {{ category }}">{{ message }}</div>
             {% endfor %}
-            </div>
         {% endif %}
     {% endwith %}
     <form method="POST">
@@ -878,28 +736,21 @@ REGISTER_TEMPLATE = '''
     <title>Cadastro - JG Minis</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 400px; margin: 100px auto; padding: 20px; background: #f4f4f4; color: #333; }
-        h2 { text-align: center; color: #333; margin-bottom: 20px; }
-        form { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        input { width: calc(100% - 22px); padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
-        .btn { background: #28a745; color: white; padding: 10px; width: 100%; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: background-color 0.3s ease; }
-        .btn:hover { background-color: #218838; }
-        .flash-messages { padding: 10px 0; text-align: center; }
-        .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        p { text-align: center; margin-top: 15px; }
-        p a { color: #007bff; text-decoration: none; }
-        p a:hover { text-decoration: underline; }
+        form { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0/0,0.1); }
+        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 5px; }
+        .btn { background: #28a745; color: white; padding: 10px; width: 100%; border: none; border-radius: 5px; cursor: pointer; }
+        .flash { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .flash.success { background: #d4edda; color: #155724; }
+        .flash.error { background: #f8d7da; color: #721c24; }
     </style>
 </head>
 <body>
     <h2>Cadastro</h2>
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
-            <div class="flash-messages">
             {% for category, message in messages %}
-                <div class="flash-{{ category }}">{{ message }}</div>
+                <div class="flash {{ category }}">{{ message }}</div>
             {% endfor %}
-            </div>
         {% endif %}
     {% endwith %}
     <form method="POST">
@@ -922,11 +773,9 @@ WAITING_TEMPLATE = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fila de Espera - {{ service.title() }} - JG Minis</title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; background: #f4f4f4; color: #333; text-align: center; }
-        h1 { color: #333; margin-bottom: 20px; }
-        p { font-size: 1.1em; margin-bottom: 30px; }
-        .btn { background: #ffc107; color: #212529; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; transition: background-color 0.3s ease; }
-        .btn:hover { background-color: #e0a800; }
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; background: #f4f4f4; color: #333; }
+        h1 { color: #333; }
+        .btn { background: #ffc107; color: #000; padding: 10px 20px; text-decoration: none; border-radius: 5px; }
     </style>
 </head>
 <body>
@@ -941,32 +790,22 @@ WAITING_TEMPLATE = '''
 @app.route('/')
 def home():
     try:
-        thumbnails = get_all_minis_data_for_display()
-        return render_template_string(HOME_TEMPLATE, thumbnails=thumbnails, logo_url=LOGO_URL, whatsapp_number=WHATSAPP_NUMBER)
+        minis = get_all_minis()
+        total_stock = sum(m['quantity'] for m in minis)
+        return render_template_string(HOME_TEMPLATE, minis=minis, logo_url=LOGO_URL, whatsapp_number=WHATSAPP_NUMBER, total_stock=total_stock)
     except Exception as e:
         logging.error(f'Erro na home: {e}')
-        flash('Erro ao carregar a página inicial. Tente novamente mais tarde.', 'error')
-        return render_template_string(HOME_TEMPLATE, thumbnails=[], logo_url=LOGO_URL, whatsapp_number=WHATSAPP_NUMBER), 500
+        flash('Erro ao carregar miniaturas. Tente novamente mais tarde.', 'error')
+        return render_template_string(HOME_TEMPLATE, minis=[], logo_url=LOGO_URL, whatsapp_number=WHATSAPP_NUMBER, total_stock=0), 500
 
 @app.route('/reserve/<service>', methods=['GET', 'POST'])
 def reserve(service):
     service_norm = normalize_service_name(service)
+    stock = get_stock(service_norm)
     
-    # Get full details for display
-    mini_details = next((item for item in get_all_minis_data_for_display() if normalize_service_name(item['service']) == service_norm), None)
-    if not mini_details:
-        flash(f'Miniatura "{service}" não encontrada.', 'error')
-        return redirect(url_for('home'))
-
-    stock = mini_details['quantity']
-    image_url = mini_details['image']
-    marca = mini_details['marca']
-    obs = mini_details['obs']
-    price = mini_details['price']
-
     if stock == 0:
-        flash(f'Estoque esgotado para "{service}". Você foi adicionado à fila de espera.', 'error')
-        logging.info(f'Redirect de reserva para fila de espera para {service_norm} - estoque 0')
+        flash('Estoque esgotado. Você foi adicionado à fila de espera!', 'error')
+        logging.info(f'Redirect de reserva falhou para {service_norm} - estoque 0')
         return redirect(url_for('waiting', service=service_norm))
     
     if not session.get('user_id'):
@@ -974,50 +813,41 @@ def reserve(service):
         return redirect(url_for('login'))
     
     if request.method == 'POST':
-        try:
-            quantity = int(request.form.get('quantity', 1))
-            if quantity &lt;= 0:
-                flash('Quantidade inválida.', 'error')
-                return render_template_string(RESERVE_TEMPLATE, service=service, stock=stock, image_url=image_url, marca=marca, obs=obs, price=price)
-            if quantity > stock:
-                flash(f'Quantidade excede o estoque disponível. Máximo: {stock}', 'error')
-                return render_template_string(RESERVE_TEMPLATE, service=service, stock=stock, image_url=image_url, marca=marca, obs=obs, price=price)
-            
-            success, msg = create_reservation(session['user_id'], service, quantity)
-            flash(msg, 'success' if success else 'error')
-            if success:
-                logging.info(f'Reserva processada com sucesso para {service_norm}')
-                return redirect(url_for('home'))
-            else:
-                logging.warning(f'Falha na reserva para {service_norm}: {msg}')
-        except ValueError:
-            flash('Quantidade deve ser um número válido.', 'error')
-        except Exception as e:
-            logging.error(f'Erro inesperado na reserva: {e}')
-            flash('Ocorreu um erro inesperado ao processar sua reserva.', 'error')
+        quantity = int(request.form.get('quantity', 1))
+        if quantity > stock:
+            flash(f'Quantidade inválida. Máximo: {stock}', 'error')
+            return render_template_string(RESERVE_TEMPLATE, service=service, stock=stock, logo_url=LOGO_URL)
+        
+        success, msg = create_reservation(session['user_id'], service, quantity)
+        flash(msg, 'success' if success else 'error')
+        if success:
+            logging.info(f'Reserva processada com sucesso para {service_norm}')
+            return redirect(url_for('home'))
+        else:
+            logging.warning(f'Falha na reserva para {service_norm}: {msg}')
     
-    return render_template_string(RESERVE_TEMPLATE, service=service, stock=stock, image_url=image_url, marca=marca, obs=obs, price=price)
+    # GET: Show form
+    return render_template_string(RESERVE_TEMPLATE, service=service, stock=stock, logo_url=LOGO_URL)
 
 @app.route('/waiting/<service>')
 def waiting(service):
-    service_norm = normalize_service_name(service)
     if not session.get('user_id'):
         flash('Faça login para entrar na fila.', 'error')
         return redirect(url_for('login'))
     
+    # Add to waiting list (idempotent - won't duplicate)
     conn = get_db_connection()
     if not conn:
-        flash('Erro interno no DB. Não foi possível adicionar à fila.', 'error')
+        flash('Erro interno ao adicionar à fila de espera.', 'error')
         return redirect(url_for('home'))
     c = conn.cursor()
     try:
-        c.execute('INSERT OR IGNORE INTO waiting_list (user_id, service) VALUES (?, ?)', (session['user_id'], service_norm))
+        c.execute('INSERT OR IGNORE INTO waiting_list (user_id, service) VALUES (?, ?)', (session['user_id'], normalize_service_name(service)))
         conn.commit()
-        logging.info(f'Adicionado à fila: usuário {session["user_id"]} para {service_norm}')
-        flash(f'Você foi adicionado à fila de espera para "{service.title()}".', 'success')
+        logging.info(f'Adicionado à fila: usuário {session["user_id"]} para {service}')
     except Exception as e:
-        logging.error(f'Erro na fila de espera: {e}')
-        flash('Erro ao adicionar à fila de espera.', 'error')
+        logging.error(f'Erro na fila: {e}')
+        flash('Erro interno ao adicionar à fila de espera.', 'error')
     finally:
         conn.close()
     
@@ -1066,9 +896,12 @@ def admin():
     
     users = get_all_users()
     reservations = get_all_reservations()
+    pending_res = [r for r in reservations if r['status'] == 'pending']
     waiting = get_waiting_list()
+    minis = get_all_minis()
+    total_stock = sum(m['quantity'] for m in minis)
     
-    return render_template_string(ADMIN_TEMPLATE, users=users, reservations=reservations, waiting=waiting)
+    return render_template_string(ADMIN_TEMPLATE, users=users, reservations=reservations, pending_res=pending_res, waiting=waiting, total_stock=total_stock)
 
 @app.route('/admin/promote/<int:user_id>', methods=['GET'])
 def admin_promote(user_id):
@@ -1117,19 +950,10 @@ def admin_insert_mini():
         return redirect(url_for('home'))
     
     service = request.form['service']
-    try:
-        quantity = int(request.form['quantity'])
-        if quantity &lt; 0:
-            flash('Quantidade não pode ser negativa.', 'error')
-            return redirect(url_for('admin'))
-        service_norm = normalize_service_name(service)
-        update_stock(service_norm, quantity - get_stock(service_norm)) # Adjust stock to new quantity
-        flash(f'Miniatura "{service}" inserida/atualizada com {quantity} unidades.', 'success')
-    except ValueError:
-        flash('Quantidade deve ser um número válido.', 'error')
-    except Exception as e:
-        logging.error(f'Erro ao inserir/atualizar miniatura: {e}')
-        flash('Erro ao inserir/atualizar miniatura.', 'error')
+    quantity = int(request.form['quantity'])
+    service_norm = normalize_service_name(service)
+    update_stock(service_norm, quantity)  # Inserts or updates
+    flash(f'Miniatura "{service}" inserida/atualizada com {quantity} unidades.', 'success')
     return redirect(url_for('admin'))
 
 @app.route('/admin/insert_reservation', methods=['POST'])
@@ -1138,26 +962,11 @@ def admin_insert_reservation():
         flash('Acesso negado.', 'error')
         return redirect(url_for('home'))
     
-    try:
-        user_id = int(request.form['user_id'])
-        service = request.form['service']
-        quantity = int(request.form['quantity'])
-        if quantity &lt;= 0:
-            flash('Quantidade deve ser positiva.', 'error')
-            return redirect(url_for('admin'))
-        
-        # Check if user exists
-        if not get_user_by_id(user_id):
-            flash(f'Usuário com ID {user_id} não encontrado.', 'error')
-            return redirect(url_for('admin'))
-
-        success, msg = create_reservation(user_id, service, quantity)
-        flash(msg, 'success' if success else 'error')
-    except ValueError:
-        flash('ID do usuário e quantidade devem ser números válidos.', 'error')
-    except Exception as e:
-        logging.error(f'Erro ao inserir reserva via admin: {e}')
-        flash('Erro ao inserir reserva.', 'error')
+    user_id = int(request.form['user_id'])
+    service = request.form['service']
+    quantity = int(request.form['quantity'])
+    success, msg = create_reservation(user_id, service, quantity)
+    flash(msg, 'success' if success else 'error')
     return redirect(url_for('admin'))
 
 @app.route('/admin/backup/json')
@@ -1168,7 +977,7 @@ def admin_backup_json():
     
     conn = get_db_connection()
     if not conn:
-        flash('Erro interno no DB para backup.', 'error')
+        flash('Erro ao gerar backup JSON: falha na conexão com o DB.', 'error')
         return redirect(url_for('admin'))
     c = conn.cursor()
     try:
@@ -1178,18 +987,15 @@ def admin_backup_json():
         res_data = [dict(row) for row in c.fetchall()]
         c.execute('SELECT * FROM stock')
         stock_data = [dict(row) for row in c.fetchall()]
-        c.execute('SELECT * FROM waiting_list')
-        waiting_data = [dict(row) for row in c.fetchall()]
+        conn.close()
         
-        backup = {'users': users_data, 'reservations': res_data, 'stock': stock_data, 'waiting_list': waiting_data, 'timestamp': datetime.now().isoformat()}
+        backup = {'users': users_data, 'reservations': res_data, 'stock': stock_data, 'timestamp': datetime.now().isoformat()}
         return send_file(io.BytesIO(json.dumps(backup, indent=2, ensure_ascii=False).encode('utf-8')), 
-                         mimetype='application/json', as_attachment=True, download_name=f'jgminis_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json')
+                         mimetype='application/json', as_attachment=True, download_name=f'jgminis_backup_{datetime.now().strftime("%Y%m%d")}.json')
     except Exception as e:
         logging.error(f'Erro ao gerar backup JSON: {e}')
         flash('Erro ao gerar backup JSON.', 'error')
         return redirect(url_for('admin'))
-    finally:
-        conn.close()
 
 @app.route('/admin/backup/csv')
 def admin_backup_csv():
@@ -1202,61 +1008,47 @@ def admin_backup_csv():
     
     conn = get_db_connection()
     if not conn:
-        flash('Erro interno no DB para backup CSV.', 'error')
+        flash('Erro ao gerar backup CSV: falha na conexão com o DB.', 'error')
         return redirect(url_for('admin'))
     c = conn.cursor()
-    
     try:
         # Users CSV
         writer.writerow(['USERS'])
-        c.execute('SELECT id, name, email, phone, role, data_cadastro FROM users')
-        writer.writerow([description[0] for description in c.description]) # Header
+        c.execute('SELECT * FROM users')
         writer.writerows([list(row) for row in c.fetchall()])
         writer.writerow([])  # Empty row
         
         # Reservations CSV
         writer.writerow(['RESERVATIONS'])
-        c.execute('SELECT id, user_id, service, quantity, status, approved_by, denied_reason, created_at FROM reservations')
-        writer.writerow([description[0] for description in c.description]) # Header
+        c.execute('SELECT * FROM reservations')
         writer.writerows([list(row) for row in c.fetchall()])
         writer.writerow([])  # Empty row
         
         # Stock CSV
         writer.writerow(['STOCK'])
-        c.execute('SELECT id, service, quantity, last_sync FROM stock')
-        writer.writerow([description[0] for description in c.description]) # Header
-        writer.writerows([list(row) for row in c.fetchall()])
-        writer.writerow([]) # Empty row
-
-        # Waiting List CSV
-        writer.writerow(['WAITING_LIST'])
-        c.execute('SELECT id, user_id, service, created_at FROM waiting_list')
-        writer.writerow([description[0] for description in c.description]) # Header
+        c.execute('SELECT * FROM stock')
         writer.writerows([list(row) for row in c.fetchall()])
         
+        conn.close()
+        
         return send_file(io.BytesIO(output.getvalue().encode('utf-8')), 
-                         mimetype='text/csv', as_attachment=True, download_name=f'jgminis_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+                         mimetype='text/csv', as_attachment=True, download_name=f'jgminis_backup_{datetime.now().strftime("%Y%m%d")}.csv')
     except Exception as e:
         logging.error(f'Erro ao gerar backup CSV: {e}')
         flash('Erro ao gerar backup CSV.', 'error')
         return redirect(url_for('admin'))
-    finally:
-        conn.close()
 
 # --- 13. Error Handlers (Prevent 500s) ---
 @app.errorhandler(404)
 def not_found(e):
-    logging.warning(f'404 Not Found: {request.url}')
-    flash('Página não encontrada.', 'error')
-    return redirect(url_for('home')), 404
+    return render_template_string('<h1>404 - Página Não Encontrada</h1><a href="/">Voltar</a>'), 404
 
 @app.errorhandler(500)
 def internal_error(e):
-    logging.critical(f'Erro 500 Interno: {e}', exc_info=True)
-    flash('Ocorreu um erro interno no servidor. Por favor, tente novamente mais tarde.', 'error')
-    return redirect(url_for('home')), 500
+    logging.error(f'Erro 500: {e}')
+    flash('Erro interno no servidor. Tente novamente.', 'error')
+    return render_template_string('<h1>500 - Erro Interno do Servidor</h1><p>Ocorreu um erro inesperado. Por favor, tente novamente mais tarde.</p><a href="/">Voltar à Home</a>'), 500
 
 if __name__ == '__main__':
-    # When running locally, ensure DB is initialized
-    # In Railway, init_db() is called globally when the module is imported by Gunicorn
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    port = int(os.environ.get('PORT', 8080))  # Railway usa 8080 para Gunicorn
+    app.run(debug=False, host='0.0.0.0', port=port)
