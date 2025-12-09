@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>404 - Página Não Encontrada</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; text-align: center; }
+        .container { max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #dc3545; font-size: 4em; margin-bottom: 10px; }
+        p { color: #666; font-size: 1.2em; }
+        a { color: #007bff; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>404</h1>
+        <p>Página Não Encontrada</p>
+        <p>A página que você está procurando não existe ou foi movida.</p>
+        <p><a href="{{ url_for('home') }}">Voltar para a página inicial</a></p>
+    </div>
+</body>
+</html>
