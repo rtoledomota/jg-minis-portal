@@ -113,7 +113,8 @@ def init_db():
                 service = record.get('NOME DA MINIATURA', '')
                 qty = record.get('QUANTIDADE DISPONIVEL', 0)
                 if service:
-                    c.execute('INSERT OR REPLACE INTO stock (service, quantity, last_sync) VALUES (?, ?, CURRENT_TIMESTAMP)', (service, qty))
+                    # Normalize service name to lower for case-insensitive matching
+                    c.execute('INSERT OR REPLACE INTO stock (service, quantity, last_sync) VALUES (?, ?, CURRENT_TIMESTAMP)', (service.lower(), qty))
             logging.info('Estoque inicial sincronizado da planilha para o DB')
         except Exception as e:
             logging.error(f'Erro na sincronização inicial do estoque: {e}')
@@ -131,7 +132,8 @@ def load_thumbnails():
     
     # Get stock quantities from DB
     c.execute("SELECT service, quantity FROM stock ORDER BY service")
-    stock_data = {row[0]: row[1] for row in c.fetchall()}
+    # Store service names in lowercase for case-insensitive lookup
+    stock_data = {row[0].lower(): row[1] for row in c.fetchall()} 
     
     # Get other details from Google Sheet
     if sheet:
@@ -139,9 +141,9 @@ def load_thumbnails():
             records = sheet.get_all_records()
             if not records:
                 logging.warning("Planilha vazia - thumbnails fallback")
-                return [{'service': 'Fallback', 'quantity': 0, 'image': LOGO_URL, 'price': '0', 'obs': 'Adicione dados na planilha', 'marca': '', 'previsao': ''}]
+                return [{'service': 'Fallback', 'quantity': 0, 'image': LOGO_URL, 'price': '0,00', 'obs': 'Adicione dados na planilha', 'marca': '', 'previsao': ''}]
             
-            for record in records: # Process all records, not just first 12, for filtering
+            for record in records: # Process all records
                 service = record.get('NOME DA MINIATURA', '')
                 if not service: continue # Skip empty service names
                 
@@ -160,7 +162,8 @@ def load_thumbnails():
                     price = 0.0
                 
                 # Get quantity from DB stock, fallback to 0 if not found
-                quantity = stock_data.get(service, 0) 
+                # Use normalized service name for lookup
+                quantity = stock_data.get(service.lower(), 0) 
 
                 thumbnails.append({
                     'service': service,
@@ -203,9 +206,11 @@ INDEX_HTML = '''
         .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
         .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
         .grid-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 25px; padding: 25px; max-width: 1200px; margin: 20px auto; }
-        .thumbnail { background-color: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); overflow: hidden; text-align: center; transition: transform 0.3s ease, box-shadow 0.3s ease; }
+        .thumbnail { background-color: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); overflow: hidden; text-align: center; transition: transform 0.3s ease, box-shadow 0.3s ease; position: relative; }
         .thumbnail:hover { transform: translateY(-5px); box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
-        .thumbnail img { width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid #eee; }
+        .thumbnail img { width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid #eee; transition: filter 0.3s ease; }
+        .thumbnail.sold-out img { filter: grayscale(100%); }
+        .sold-out-tag { position: absolute; top: 10px; left: 10px; background-color: #dc3545; color: white; padding: 5px 10px; border-radius: 5px; font-weight: bold; font-size: 0.8em; z-index: 10; }
         .thumbnail-content { padding: 15px; }
         .thumbnail h3 { font-size: 1.3em; color: #007bff; margin-top: 0; margin-bottom: 8px; }
         .thumbnail p { font-size: 0.95em; color: #555; margin-bottom: 5px; line-height: 1.4; }
@@ -215,8 +220,8 @@ INDEX_HTML = '''
         .btn { display: inline-block; padding: 10px 18px; border-radius: 5px; text-decoration: none; font-weight: bold; transition: background-color 0.3s ease, color 0.3s ease; }
         .btn-reserve { background-color: #28a745; color: white; border: none; }
         .btn-reserve:hover { background-color: #218838; }
-        .btn-whatsapp { background-color: #25D366; color: white; border: none; }
-        .btn-whatsapp:hover { background-color: #1DA851; }
+        .btn-waiting-list { background-color: #ffc107; color: #333; border: none; }
+        .btn-waiting-list:hover { background-color: #e0a800; }
         footer { background-color: #343a40; color: white; text-align: center; padding: 15px 20px; margin-top: 40px; font-size: 0.9em; }
         @media (max-width: 768px) {
             header h1 { font-size: 1.8em; }
@@ -254,17 +259,22 @@ INDEX_HTML = '''
     </div>
     <main class="grid-container">
         {% for thumb in thumbnails %}
-            <div class="thumbnail">
+            <div class="thumbnail {% if thumb.quantity == 0 %}sold-out{% endif %}">
                 <img src="{{ thumb.image }}" alt="{{ thumb.service }}" onerror="this.onerror=null;this.src='{{ logo_url }}';">
+                {% if thumb.quantity == 0 %}<div class="sold-out-tag">ESGOTADO</div>{% endif %}
                 <div class="thumbnail-content">
                     <h3>{{ thumb.service }}</h3>
                     <p>{{ thumb.marca }} - {{ thumb.obs }}</p>
                     <p class="price">R$ {{ thumb.price }}</p>
                     <p class="quantity">Disponível: {{ thumb.quantity }}</p>
                     <div class="action-buttons">
-                        <a href="{{ url_for('reserve_single', service=thumb.service) }}" class="btn btn-reserve">Reservar Agora</a>
-                        {% if thumb.quantity == 0 %}
-                            <a href="https://wa.me/{{ whatsapp_number }}?text=Olá, gostaria de saber sobre a fila de espera para {{ thumb.service }}. Meu email: {{ session.get('email', 'anônimo') }}" class="btn btn-whatsapp" target="_blank">Entrar em Contato</a>
+                        {% if thumb.quantity > 0 %}
+                            <a href="{{ url_for('reserve_single', service=thumb.service) }}" class="btn btn-reserve">Reservar Agora</a>
+                        {% else %}
+                            <form action="{{ url_for('add_to_waiting_list') }}" method="post" style="display:inline;">
+                                <input type="hidden" name="service" value="{{ thumb.service }}">
+                                <button type="submit" class="btn btn-waiting-list">FILA DE ESPERA</button>
+                            </form>
                         {% endif %}
                     </div>
                 </div>
@@ -295,52 +305,51 @@ REGISTER_HTML = '''
     <title>Registrar - JG MINIS</title>
     <style>
         body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .register-container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
-        .register-container h1 { color: #004085; margin-bottom: 25px; font-size: 1.8em; }
-        .register-container form { display: flex; flex-direction: column; gap: 15px; }
-        .register-container label { text-align: left; font-weight: bold; color: #555; }
-        .register-container input[type="text"],
-        .register-container input[type="email"],
-        .register-container input[type="password"] {
-            padding: 12px; border: 1px solid #ccc; border-radius: 5px; font-size: 1em; width: 100%; box-sizing: border-box;
-        }
-        .register-container button {
-            background-color: #28a745; color: white; padding: 12px 20px; border: none; border-radius: 5px;
-            font-size: 1.1em; cursor: pointer; transition: background-color 0.3s ease;
-        }
-        .register-container button:hover { background-color: #218838; }
-        .register-container p { margin-top: 20px; font-size: 0.95em; }
-        .register-container a { color: #007bff; text-decoration: none; transition: color 0.3s ease; }
-        .register-container a:hover { color: #0056b3; text-decoration: underline; }
-        .flash-messages { margin-top: 15px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
+        .register-container { background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
+        h1 { color: #004085; margin-bottom: 25px; font-size: 1.8em; }
+        .form-group { margin-bottom: 15px; text-align: left; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
+        input[type="text"], input[type="email"], input[type="password"] { width: calc(100% - 20px); padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 1em; }
+        button { width: 100%; padding: 12px; background-color: #28a745; color: white; border: none; border-radius: 5px; font-size: 1.1em; font-weight: bold; cursor: pointer; transition: background-color 0.3s ease; margin-top: 20px; }
+        button:hover { background-color: #218838; }
+        .link-text { margin-top: 20px; font-size: 0.95em; }
+        .link-text a { color: #007bff; text-decoration: none; transition: color 0.3s ease; }
+        .link-text a:hover { color: #0056b3; text-decoration: underline; }
+        .flash-message { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 15px; font-size: 0.9em; }
     </style>
 </head>
 <body>
     <div class="register-container">
         <h1>Registrar</h1>
-        <div class="flash-messages">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}
-                    {% for category, message in messages %}
-                        <div class="flash-{{ category }}">{{ message }}</div>
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="flash-message">
+                    {% for message in messages %}
+                        <p>{{ message }}</p>
                     {% endfor %}
-                {% endif %}
-            {% endwith %}
-        </div>
+                </div>
+            {% endif %}
+        {% endwith %}
         <form method="post">
-            <label for="name">Nome:</label>
-            <input type="text" id="name" name="name" required value="{{ request.form.name if request.method == 'POST' else '' }}">
-            <label for="email">Email:</label>
-            <input type="email" id="email" name="email" required value="{{ request.form.email if request.method == 'POST' else '' }}">
-            <label for="phone">Telefone:</label>
-            <input type="text" id="phone" name="phone" required placeholder="Apenas números (DDD+Número)" value="{{ request.form.phone if request.method == 'POST' else '' }}">
-            <label for="password">Senha (mín. 6 caracteres):</label>
-            <input type="password" id="password" name="password" required minlength="6">
+            <div class="form-group">
+                <label for="name">Nome:</label>
+                <input type="text" id="name" name="name" required>
+            </div>
+            <div class="form-group">
+                <label for="email">Email:</label>
+                <input type="email" id="email" name="email" required>
+            </div>
+            <div class="form-group">
+                <label for="phone">Telefone (apenas números):</label>
+                <input type="text" id="phone" name="phone" required pattern="[0-9]{10,11}" title="Telefone deve conter 10 ou 11 dígitos numéricos">
+            </div>
+            <div class="form-group">
+                <label for="password">Senha (mín. 6 caracteres):</label>
+                <input type="password" id="password" name="password" required minlength="6">
+            </div>
             <button type="submit">Registrar</button>
         </form>
-        <p>Já tem uma conta? <a href="{{ url_for('login') }}">Fazer Login</a></p>
-        <p><a href="{{ url_for('index') }}">Voltar para Home</a></p>
+        <p class="link-text">Já tem conta? <a href="{{ url_for('login') }}">Fazer Login</a></p>
     </div>
 </body>
 </html>
@@ -355,47 +364,115 @@ LOGIN_HTML = '''
     <title>Login - JG MINIS</title>
     <style>
         body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .login-container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
-        .login-container h1 { color: #004085; margin-bottom: 25px; font-size: 1.8em; }
-        .login-container form { display: flex; flex-direction: column; gap: 15px; }
-        .login-container label { text-align: left; font-weight: bold; color: #555; }
-        .login-container input[type="email"],
-        .login-container input[type="password"] {
-            padding: 12px; border: 1px solid #ccc; border-radius: 5px; font-size: 1em; width: 100%; box-sizing: border-box;
-        }
-        .login-container button {
-            background-color: #007bff; color: white; padding: 12px 20px; border: none; border-radius: 5px;
-            font-size: 1.1em; cursor: pointer; transition: background-color 0.3s ease;
-        }
-        .login-container button:hover { background-color: #0056b3; }
-        .login-container p { margin-top: 20px; font-size: 0.95em; }
-        .login-container a { color: #28a745; text-decoration: none; transition: color 0.3s ease; }
-        .login-container a:hover { color: #218838; text-decoration: underline; }
-        .flash-messages { margin-top: 15px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
+        .login-container { background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
+        h1 { color: #004085; margin-bottom: 25px; font-size: 1.8em; }
+        .form-group { margin-bottom: 15px; text-align: left; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
+        input[type="email"], input[type="password"] { width: calc(100% - 20px); padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 1em; }
+        button { width: 100%; padding: 12px; background-color: #007bff; color: white; border: none; border-radius: 5px; font-size: 1.1em; font-weight: bold; cursor: pointer; transition: background-color 0.3s ease; margin-top: 20px; }
+        button:hover { background-color: #0056b3; }
+        .link-text { margin-top: 20px; font-size: 0.95em; }
+        .link-text a { color: #28a745; text-decoration: none; transition: color 0.3s ease; }
+        .link-text a:hover { color: #218838; text-decoration: underline; }
+        .flash-message { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 15px; font-size: 0.9em; }
     </style>
 </head>
 <body>
     <div class="login-container">
         <h1>Login</h1>
-        <div class="flash-messages">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}
-                    {% for category, message in messages %}
-                        <div class="flash-{{ category }}">{{ message }}</div>
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="flash-message">
+                    {% for message in messages %}
+                        <p>{{ message }}</p>
                     {% endfor %}
-                {% endif %}
-            {% endwith %}
-        </div>
+                </div>
+            {% endif %}
+        {% endwith %}
         <form method="post">
-            <label for="email">Email:</label>
-            <input type="email" id="email" name="email" required value="{{ request.form.email if request.method == 'POST' else '' }}">
-            <label for="password">Senha:</label>
-            <input type="password" id="password" name="password" required>
+            <div class="form-group">
+                <label for="email">Email:</label>
+                <input type="email" id="email" name="email" required>
+            </div>
+            <div class="form-group">
+                <label for="password">Senha:</label>
+                <input type="password" id="password" name="password" required>
+            </div>
             <button type="submit">Entrar</button>
         </form>
-        <p>Não tem uma conta? <a href="{{ url_for('register') }}">Registrar</a></p>
-        <p><a href="{{ url_for('index') }}">Voltar para Home</a></p>
+        <p class="link-text">Não tem conta? <a href="{{ url_for('register') }}">Registrar</a></p>
+    </div>
+</body>
+</html>
+'''
+
+PROFILE_HTML = '''
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meu Perfil - JG MINIS</title>
+    <style>
+        body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 20px; }
+        .container { background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 800px; margin: 20px auto; }
+        h1 { color: #004085; text-align: center; margin-bottom: 30px; }
+        h2 { color: #007bff; margin-top: 30px; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+        .user-info p { margin-bottom: 8px; font-size: 1.05em; }
+        .user-info strong { color: #555; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #f8f8f8; color: #555; font-weight: bold; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        .status-pending { color: #ffc107; font-weight: bold; }
+        .status-approved { color: #28a745; font-weight: bold; }
+        .status-denied { color: #dc3545; font-weight: bold; }
+        .no-reservations { text-align: center; color: #6c757d; margin-top: 20px; }
+        .back-link { display: block; text-align: center; margin-top: 30px; font-size: 1.05em; }
+        .back-link a { color: #007bff; text-decoration: none; transition: color 0.3s ease; }
+        .back-link a:hover { color: #0056b3; text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Meu Perfil</h1>
+        <div class="user-info">
+            <p><strong>Nome:</strong> {{ user.name }}</p>
+            <p><strong>Email:</strong> {{ user.email }}</p>
+            <p><strong>Telefone:</strong> {{ user.phone }}</p>
+            <p><strong>Membro desde:</strong> {{ user.data_cadastro }}</p>
+        </div>
+
+        <h2>Minhas Reservas</h2>
+        {% if reservations %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Serviço</th>
+                        <th>Quantidade</th>
+                        <th>Status</th>
+                        <th>Data da Reserva</th>
+                        <th>Motivo Rejeição</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for res in reservations %}
+                        <tr>
+                            <td>{{ res.service }}</td>
+                            <td>{{ res.quantity }}</td>
+                            <td class="status-{{ res.status }}">{{ res.status.capitalize() }}</td>
+                            <td>{{ res.created_at }}</td>
+                            <td>{{ res.denied_reason if res.denied_reason else '-' }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p class="no-reservations">Você ainda não fez nenhuma reserva.</p>
+        {% endif %}
+        <div class="back-link">
+            <a href="{{ url_for('index') }}">Voltar para Home</a>
+        </div>
     </div>
 </body>
 </html>
@@ -410,57 +487,64 @@ RESERVE_SINGLE_HTML = '''
     <title>Reservar {{ thumb.service }} - JG MINIS</title>
     <style>
         body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .reserve-container { background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 500px; text-align: center; }
-        .reserve-container h1 { color: #004085; margin-bottom: 25px; font-size: 1.8em; }
-        .reserve-container img { max-width: 80%; height: auto; border-radius: 8px; margin-bottom: 20px; }
-        .reserve-container p { font-size: 1em; color: #555; margin-bottom: 10px; }
-        .reserve-container .price { font-size: 1.2em; font-weight: bold; color: #28a745; margin-bottom: 15px; }
-        .reserve-container form { display: flex; flex-direction: column; gap: 15px; align-items: center; }
-        .reserve-container label { font-weight: bold; color: #555; }
-        .reserve-container input[type="number"] {
-            padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 1em; width: 80px; text-align: center;
-        }
-        .reserve-container button {
-            background-color: #007bff; color: white; padding: 12px 25px; border: none; border-radius: 5px;
-            font-size: 1.1em; cursor: pointer; transition: background-color 0.3s ease; margin-top: 10px;
-        }
-        .reserve-container button:hover { background-color: #0056b3; }
-        .btn-whatsapp { background-color: #25D366; color: white; padding: 12px 25px; border: none; border-radius: 5px;
-            font-size: 1.1em; cursor: pointer; text-decoration: none; display: inline-block; margin-top: 15px;
-            transition: background-color 0.3s ease; }
-        .btn-whatsapp:hover { background-color: #1DA851; }
-        .flash-messages { margin-top: 15px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .back-link { margin-top: 25px; font-size: 0.95em; }
+        .reserve-container { background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 500px; text-align: center; }
+        h1 { color: #004085; margin-bottom: 25px; font-size: 1.8em; }
+        .thumbnail-details img { max-width: 80%; height: auto; border-radius: 5px; margin-bottom: 15px; }
+        .thumbnail-details p { margin-bottom: 8px; font-size: 1.05em; }
+        .thumbnail-details strong { color: #555; }
+        .form-group { margin-bottom: 20px; text-align: left; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; color: #555; font-size: 1.1em; }
+        input[type="number"] { width: calc(100% - 20px); padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 1em; }
+        .action-buttons { display: flex; justify-content: center; gap: 15px; margin-top: 20px; }
+        .btn { padding: 12px 25px; border-radius: 5px; text-decoration: none; font-weight: bold; font-size: 1.1em; cursor: pointer; transition: background-color 0.3s ease, color 0.3s ease; border: none; }
+        .btn-reserve { background-color: #28a745; color: white; }
+        .btn-reserve:hover { background-color: #218838; }
+        .btn-waiting-list { background-color: #ffc107; color: #333; }
+        .btn-waiting-list:hover { background-color: #e0a800; }
+        .back-link { margin-top: 20px; font-size: 1em; }
         .back-link a { color: #007bff; text-decoration: none; transition: color 0.3s ease; }
         .back-link a:hover { color: #0056b3; text-decoration: underline; }
+        .flash-message { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 15px; font-size: 0.9em; }
     </style>
 </head>
 <body>
     <div class="reserve-container">
         <h1>Reservar {{ thumb.service }}</h1>
-        <img src="{{ thumb.image }}" alt="{{ thumb.service }}" onerror="this.onerror=null;this.src='{{ logo_url }}';">
-        <p>{{ thumb.marca }} - {{ thumb.obs }}</p>
-        <p class="price">R$ {{ thumb.price }}</p>
-        <p>Disponível: {{ current_stock }}</p>
-        <div class="flash-messages">
-            {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}
-                    {% for category, message in messages %}
-                        <div class="flash-{{ category }}">{{ message }}</div>
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="flash-message">
+                    {% for message in messages %}
+                        <p>{{ message }}</p>
                     {% endfor %}
-                {% endif %}
-            {% endwith %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        <div class="thumbnail-details">
+            <img src="{{ thumb.image }}" alt="{{ thumb.service }}" onerror="this.onerror=null;this.src='{{ logo_url }}';">
+            <p><strong>Marca:</strong> {{ thumb.marca }}</p>
+            <p><strong>Observações:</strong> {{ thumb.obs }}</p>
+            <p><strong>Preço:</strong> R$ {{ thumb.price }}</p>
+            <p><strong>Disponível:</strong> {{ thumb.quantity }}</p>
         </div>
-        {% if current_stock > 0 %}
+
+        {% if thumb.quantity > 0 %}
             <form method="post">
-                <label for="quantity">Quantidade:</label>
-                <input type="number" id="quantity" name="quantity" min="1" max="{{ current_stock }}" value="1" required>
-                <button type="submit">Confirmar Reserva</button>
+                <div class="form-group">
+                    <label for="quantity">Quantidade a reservar:</label>
+                    <input type="number" id="quantity" name="quantity" min="1" max="{{ thumb.quantity }}" value="1" required>
+                </div>
+                <div class="action-buttons">
+                    <button type="submit" class="btn btn-reserve">Confirmar Reserva</button>
+                </div>
             </form>
         {% else %}
-            <p>Estoque indisponível para esta miniatura.</p>
-            <a href="https://wa.me/{{ whatsapp_number }}?text=Olá, gostaria de saber sobre a fila de espera para {{ thumb.service }}. Meu email: {{ session.get('email', 'anônimo') }}" class="btn-whatsapp" target="_blank">Entrar em Contato</a>
+            <p>Esta miniatura está esgotada no momento.</p>
+            <div class="action-buttons">
+                <form action="{{ url_for('add_to_waiting_list') }}" method="post" style="display:inline;">
+                    <input type="hidden" name="service" value="{{ thumb.service }}">
+                    <button type="submit" class="btn btn-waiting-list">FILA DE ESPERA</button>
+                </form>
+            </div>
         {% endif %}
         <p class="back-link"><a href="{{ url_for('index') }}">Voltar para Home</a></p>
     </div>
@@ -476,240 +560,94 @@ RESERVAR_HTML = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Reservar Múltiplas Miniaturas - JG MINIS</title>
     <style>
-        body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 0; }
-        header { background-color: #004085; color: white; padding: 15px 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        header h1 { margin: 0; font-size: 2em; }
-        nav { background-color: #e9ecef; padding: 10px 20px; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-        nav a { color: #007bff; text-decoration: none; margin: 0 15px; font-weight: bold; transition: color 0.3s; }
-        nav a:hover { color: #0056b3; text-decoration: underline; }
-        .flash-messages { padding: 10px 20px; margin-top: 10px; text-align: center; }
-        .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .container { max-width: 1200px; margin: 20px auto; padding: 20px; background-color: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+        body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 20px; }
+        .container { background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 1200px; margin: 20px auto; }
         h1 { color: #004085; text-align: center; margin-bottom: 30px; }
-        .filter-form { display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; margin-bottom: 30px; padding: 15px; border: 1px solid #eee; border-radius: 8px; background-color: #f9f9f9; }
-        .filter-form label { display: flex; align-items: center; gap: 5px; font-weight: bold; color: #555; }
-        .filter-form input[type="text"], .filter-form select { padding: 8px; border: 1px solid #ccc; border-radius: 5px; font-size: 0.9em; }
-        .filter-form button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; transition: background-color 0.3s ease; }
-        .filter-form button:hover { background-color: #0056b3; }
-        .reservation-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }
-        .reservation-item { border: 1px solid #ddd; border-radius: 8px; overflow: hidden; background-color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-        .reservation-item img { width: 100%; height: 150px; object-fit: cover; border-bottom: 1px solid #eee; }
-        .item-content { padding: 15px; text-align: center; }
-        .item-content h3 { font-size: 1.2em; color: #007bff; margin-top: 0; margin-bottom: 8px; }
-        .item-content p { font-size: 0.9em; color: #555; margin-bottom: 5px; }
-        .item-content .price { font-weight: bold; color: #28a745; }
-        .item-content .quantity-input { display: flex; justify-content: center; align-items: center; gap: 5px; margin-top: 10px; }
-        .item-content .quantity-input input[type="number"] { width: 60px; padding: 5px; border: 1px solid #ccc; border-radius: 4px; text-align: center; font-size: 0.9em; }
-        .item-content .checkbox-label { display: flex; align-items: center; justify-content: center; gap: 5px; margin-top: 10px; font-weight: bold; color: #333; }
-        .item-content .btn-whatsapp { background-color: #25D366; color: white; padding: 8px 15px; border: none; border-radius: 5px; text-decoration: none; font-weight: bold; font-size: 0.9em; margin-top: 10px; display: inline-block; transition: background-color 0.3s ease; }
-        .item-content .btn-whatsapp:hover { background-color: #1DA851; }
-        .submit-all-btn { background-color: #28a745; color: white; padding: 15px 30px; border: none; border-radius: 8px; font-size: 1.2em; cursor: pointer; transition: background-color 0.3s ease; display: block; width: fit-content; margin: 30px auto 0; }
+        .filters { display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; margin-bottom: 30px; padding: 15px; background-color: #f8f8f8; border-radius: 8px; }
+        .filters label { font-weight: bold; color: #555; display: flex; align-items: center; gap: 5px; }
+        .filters input[type="text"], .filters select { padding: 8px; border: 1px solid #ccc; border-radius: 5px; font-size: 0.95em; }
+        .filters button { padding: 8px 15px; background-color: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: background-color 0.3s ease; }
+        .filters button:hover { background-color: #0056b3; }
+        .miniature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 25px; margin-top: 20px; }
+        .miniature-item { background-color: #fdfdfd; border: 1px solid #eee; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; text-align: center; padding: 15px; position: relative; }
+        .miniature-item.sold-out { opacity: 0.7; }
+        .miniature-item img { width: 100%; height: 150px; object-fit: cover; border-radius: 5px; margin-bottom: 10px; transition: filter 0.3s ease; }
+        .miniature-item.sold-out img { filter: grayscale(100%); }
+        .sold-out-tag { position: absolute; top: 10px; left: 10px; background-color: #dc3545; color: white; padding: 5px 10px; border-radius: 5px; font-weight: bold; font-size: 0.8em; z-index: 10; }
+        .miniature-item h3 { font-size: 1.2em; color: #007bff; margin-bottom: 5px; }
+        .miniature-item p { font-size: 0.9em; color: #555; margin-bottom: 5px; }
+        .miniature-item .price { font-weight: bold; color: #28a745; }
+        .miniature-item .quantity-input { width: 80px; padding: 5px; border: 1px solid #ccc; border-radius: 4px; text-align: center; margin-top: 10px; }
+        .action-buttons { display: flex; justify-content: center; gap: 10px; margin-top: 15px; }
+        .btn { padding: 8px 15px; border-radius: 5px; text-decoration: none; font-weight: bold; font-size: 0.95em; cursor: pointer; transition: background-color 0.3s ease; border: none; }
+        .btn-waiting-list { background-color: #ffc107; color: #333; }
+        .btn-waiting-list:hover { background-color: #e0a800; }
+        .submit-all-btn { display: block; width: fit-content; margin: 30px auto 0; padding: 12px 30px; background-color: #28a745; color: white; border: none; border-radius: 5px; font-size: 1.1em; font-weight: bold; cursor: pointer; transition: background-color 0.3s ease; }
         .submit-all-btn:hover { background-color: #218838; }
-        footer { background-color: #343a40; color: white; text-align: center; padding: 15px 20px; margin-top: 40px; font-size: 0.9em; }
-        @media (max-width: 768px) {
-            .filter-form { flex-direction: column; align-items: stretch; }
-            .filter-form label { justify-content: space-between; }
-            .reservation-grid { grid-template-columns: 1fr; }
-        }
+        .flash-message { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 15px; text-align: center; }
     </style>
 </head>
 <body>
-    <header>
+    <div class="container">
         <h1>Reservar Múltiplas Miniaturas</h1>
-    </header>
-    <nav>
-        <a href="{{ url_for('index') }}">Home</a>
-        {% if not session.get('user_id') %}
-            <a href="{{ url_for('login') }}">Login</a>
-            <a href="{{ url_for('register') }}">Registrar</a>
-        {% else %}
-            <a href="{{ url_for('reservar') }}">Reservar Miniaturas</a>
-            {% if session.get('role') == 'admin' %}<a href="{{ url_for('admin') }}">Admin</a>{% endif %}
-            <a href="{{ url_for('profile') }}">Meu Perfil</a>
-            <a href="{{ url_for('logout') }}">Logout</a>
-        {% endif %}
-    </nav>
-    <div class="flash-messages">
-        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% with messages = get_flashed_messages() %}
             {% if messages %}
-                {% for category, message in messages %}
-                    <div class="flash-{{ category }}">{{ message }}</div>
-                {% endfor %}
+                <div class="flash-message">
+                    {% for message in messages %}
+                        <p>{{ message }}</p>
+                    {% endfor %}
+                </div>
             {% endif %}
         {% endwith %}
-    </div>
-    <div class="container">
-        <form method="get" class="filter-form">
-            <label>Disponíveis: <input type="checkbox" name="available" value="1" {% if request.args.get('available') == '1' %}checked{% endif %}></label>
-            <label>Ordenar por:
-                <select name="order_by">
-                    <option value="">Padrão</option>
-                    <option value="service_asc" {% if request.args.get('order_by') == 'service_asc' %}selected{% endif %}>Nome (A-Z)</option>
-                    <option value="service_desc" {% if request.args.get('order_by') == 'service_desc' %}selected{% endif %}>Nome (Z-A)</option>
-                    <option value="price_asc" {% if request.args.get('order_by') == 'price_asc' %}selected{% endif %}>Preço (Menor)</option>
-                    <option value="price_desc" {% if request.args.get('order_by') == 'price_desc' %}selected{% endif %}>Preço (Maior)</option>
-                    <option value="previsao_asc" {% if request.args.get('order_by') == 'previsao_asc' %}selected{% endif %}>Previsão (Antiga)</option>
-                    <option value="previsao_desc" {% if request.args.get('order_by') == 'previsao_desc' %}selected{% endif %}>Previsão (Recente)</option>
-                </select>
-            </label>
-            <label>Marca: <input type="text" name="marca" value="{{ request.args.get('marca', '') }}" placeholder="Filtrar por marca"></label>
-            <button type="submit">Aplicar Filtros</button>
-            <button type="button" onclick="window.location.href='{{ url_for('reservar') }}'">Limpar Filtros</button>
-        </form>
 
-        <form method="post">
-            <div class="reservation-grid">
+        <div class="filters">
+            <form method="get" action="{{ url_for('reservar') }}">
+                <label><input type="checkbox" name="available" value="1" {% if request.args.get('available') %}checked{% endif %}> Disponíveis</label>
+                <label>Ordenar por:
+                    <select name="order_by">
+                        <option value="">Padrão</option>
+                        <option value="service_asc" {% if request.args.get('order_by') == 'service_asc' %}selected{% endif %}>Nome (A-Z)</option>
+                        <option value="service_desc" {% if request.args.get('order_by') == 'service_desc' %}selected{% endif %}>Nome (Z-A)</option>
+                        <option value="price_asc" {% if request.args.get('order_by') == 'price_asc' %}selected{% endif %}>Preço (Menor)</option>
+                        <option value="price_desc" {% if request.args.get('order_by') == 'price_desc' %}selected{% endif %}>Preço (Maior)</option>
+                    </select>
+                </label>
+                <label>Previsão de Chegada: <input type="text" name="previsao" value="{{ request.args.get('previsao', '') }}"></label>
+                <label>Marca: <input type="text" name="marca" value="{{ request.args.get('marca', '') }}"></label>
+                <button type="submit">Filtrar</button>
+            </form>
+        </div>
+
+        <form method="post" action="{{ url_for('reservar') }}">
+            <div class="miniature-grid">
                 {% for thumb in thumbnails %}
-                    <div class="reservation-item">
+                    <div class="miniature-item {% if thumb.quantity == 0 %}sold-out{% endif %}">
                         <img src="{{ thumb.image }}" alt="{{ thumb.service }}" onerror="this.onerror=null;this.src='{{ logo_url }}';">
-                        <div class="item-content">
-                            <h3>{{ thumb.service }}</h3>
-                            <p>{{ thumb.marca }} - {{ thumb.obs }}</p>
-                            <p class="price">R$ {{ thumb.price }}</p>
-                            <p>Disponível: {{ thumb.quantity }}</p>
-                            {% if thumb.quantity > 0 %}
-                                <label class="checkbox-label">
-                                    <input type="checkbox" name="services" value="{{ thumb.service }}" onchange="toggleQuantityInput(this)"> Selecionar
-                                </label>
-                                <div class="quantity-input" id="qty-{{ thumb.service | replace(' ', '-') }}" style="display:none;">
-                                    <label for="quantity_{{ thumb.service }}">Qtd:</label>
-                                    <input type="number" id="quantity_{{ thumb.service }}" name="quantity_{{ thumb.service }}" min="1" max="{{ thumb.quantity }}" value="1">
-                                </div>
-                            {% else %}
-                                <a href="https://wa.me/{{ whatsapp_number }}?text=Olá, gostaria de saber sobre a fila de espera para {{ thumb.service }}. Meu email: {{ session.get('email', 'anônimo') }}" class="btn-whatsapp" target="_blank">Entrar em Contato</a>
-                            {% endif %}
-                        </div>
+                        {% if thumb.quantity == 0 %}<div class="sold-out-tag">ESGOTADO</div>{% endif %}
+                        <h3>{{ thumb.service }}</h3>
+                        <p>{{ thumb.marca }}</p>
+                        <p class="price">R$ {{ thumb.price }}</p>
+                        <p>Disponível: {{ thumb.quantity }}</p>
+                        {% if thumb.quantity > 0 %}
+                            <label for="qty_{{ loop.index }}">Reservar:</label>
+                            <input type="number" id="qty_{{ loop.index }}" name="quantity_{{ thumb.service }}" min="0" max="{{ thumb.quantity }}" value="0" class="quantity-input">
+                        {% else %}
+                            <div class="action-buttons">
+                                <form action="{{ url_for('add_to_waiting_list') }}" method="post" style="display:inline;">
+                                    <input type="hidden" name="service" value="{{ thumb.service }}">
+                                    <button type="submit" class="btn btn-waiting-list">FILA DE ESPERA</button>
+                                </form>
+                            </div>
+                        {% endif %}
                     </div>
                 {% endfor %}
             </div>
             {% if thumbnails %}
                 <button type="submit" class="submit-all-btn">Confirmar Reservas Selecionadas</button>
-            {% else %}
-                <p style="text-align: center; margin-top: 30px;">Nenhuma miniatura encontrada com os filtros aplicados.</p>
             {% endif %}
         </form>
+        <p style="text-align: center; margin-top: 20px;"><a href="{{ url_for('index') }}">Voltar para Home</a></p>
     </div>
-    <script>
-        function toggleQuantityInput(checkbox) {
-            const service = checkbox.value;
-            const qtyInputDiv = document.getElementById(`qty-${service.replace(/ /g, '-')}`);
-            if (checkbox.checked) {
-                qtyInputDiv.style.display = 'flex';
-            } else {
-                qtyInputDiv.style.display = 'none';
-                qtyInputDiv.querySelector('input').value = 1; // Reset quantity
-            }
-        }
-        // Initialize state based on current form values (e.g., after a failed submission)
-        document.addEventListener('DOMContentLoaded', () => {
-            document.querySelectorAll('input[name="services"]').forEach(checkbox => {
-                if (checkbox.checked) {
-                    toggleQuantityInput(checkbox);
-                }
-            });
-        });
-    </script>
-    <footer>
-        <p>&copy; {{ datetime.now().year }} JG MINIS. Todos os direitos reservados.</p>
-    </footer>
-</body>
-</html>
-'''
-
-PROFILE_HTML = '''
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Meu Perfil - JG MINIS</title>
-    <style>
-        body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 0; }
-        header { background-color: #004085; color: white; padding: 15px 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        header h1 { margin: 0; font-size: 2em; }
-        nav { background-color: #e9ecef; padding: 10px 20px; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-        nav a { color: #007bff; text-decoration: none; margin: 0 15px; font-weight: bold; transition: color 0.3s; }
-        nav a:hover { color: #0056b3; text-decoration: underline; }
-        .flash-messages { padding: 10px 20px; margin-top: 10px; text-align: center; }
-        .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .container { max-width: 900px; margin: 20px auto; padding: 20px; background-color: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
-        h1 { color: #004085; text-align: center; margin-bottom: 30px; }
-        h2 { color: #007bff; margin-top: 30px; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-        .user-info p { font-size: 1em; margin-bottom: 8px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; font-size: 0.95em; }
-        th { background-color: #f2f2f2; font-weight: bold; color: #333; }
-        tr:nth-child(even) { background-color: #f9f9f9; }
-        tr:hover { background-color: #f1f1f1; }
-        .no-reservations { text-align: center; color: #6c757d; margin-top: 20px; }
-        footer { background-color: #343a40; color: white; text-align: center; padding: 15px 20px; margin-top: 40px; font-size: 0.9em; }
-    </style>
-</head>
-<body>
-    <header>
-        <h1>Meu Perfil</h1>
-    </header>
-    <nav>
-        <a href="{{ url_for('index') }}">Home</a>
-        {% if not session.get('user_id') %}
-            <a href="{{ url_for('login') }}">Login</a>
-            <a href="{{ url_for('register') }}">Registrar</a>
-        {% else %}
-            <a href="{{ url_for('reservar') }}">Reservar Miniaturas</a>
-            {% if session.get('role') == 'admin' %}<a href="{{ url_for('admin') }}">Admin</a>{% endif %}
-            <a href="{{ url_for('profile') }}">Meu Perfil</a>
-            <a href="{{ url_for('logout') }}">Logout</a>
-        {% endif %}
-    </nav>
-    <div class="flash-messages">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, message in messages %}
-                    <div class="flash-{{ category }}">{{ message }}</div>
-                {% endfor %}
-            {% endif %}
-        {% endwith %}
-    </div>
-    <div class="container">
-        <h2>Minhas Informações</h2>
-        <div class="user-info">
-            <p><strong>Nome:</strong> {{ user.name }}</p>
-            <p><strong>Email:</strong> {{ user.email }}</p>
-            <p><strong>Telefone:</strong> {{ user.phone }}</p>
-            <p><strong>Membro desde:</strong> {{ user.data_cadastro }}</p>
-        </div>
-
-        <h2>Minhas Reservas</h2>
-        {% if reservations %}
-            <table>
-                <thead>
-                    <tr>
-                        <th>Miniatura</th>
-                        <th>Quantidade</th>
-                        <th>Status</th>
-                        <th>Data da Reserva</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for res in reservations %}
-                        <tr>
-                            <td>{{ res.service }}</td>
-                            <td>{{ res.quantity }}</td>
-                            <td>{{ res.status }}</td>
-                            <td>{{ res.created_at }}</td>
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        {% else %}
-            <p class="no-reservations">Você ainda não fez nenhuma reserva.</p>
-        {% endif %}
-    </div>
-    <footer>
-        <p>&copy; {{ datetime.now().year }} JG MINIS. Todos os direitos reservados.</p>
-    </footer>
 </body>
 </html>
 '''
@@ -722,122 +660,102 @@ ADMIN_HTML = '''
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Painel Admin - JG MINIS</title>
     <style>
-        body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 0; }
-        header { background-color: #004085; color: white; padding: 15px 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        header h1 { margin: 0; font-size: 2em; }
-        nav { background-color: #e9ecef; padding: 10px 20px; text-align: center; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-        nav a { color: #007bff; text-decoration: none; margin: 0 15px; font-weight: bold; transition: color 0.3s; }
-        nav a:hover { color: #0056b3; text-decoration: underline; }
-        .flash-messages { padding: 10px 20px; margin-top: 10px; text-align: center; }
-        .flash-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .flash-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 5px; padding: 8px; margin-bottom: 10px; }
-        .container { max-width: 1200px; margin: 20px auto; padding: 20px; background-color: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+        body { font-family: 'Arial', sans-serif; background-color: #f4f4f4; color: #333; margin: 0; padding: 20px; }
+        .container { background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); max-width: 1200px; margin: 20px auto; }
         h1 { color: #004085; text-align: center; margin-bottom: 30px; }
         h2 { color: #007bff; margin-top: 30px; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background-color: #f9f9f9; border-radius: 8px; padding: 20px; text-align: center; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
-        .stat-card h3 { color: #007bff; margin-top: 0; margin-bottom: 10px; font-size: 1.2em; }
-        .stat-card p { font-size: 1.8em; font-weight: bold; color: #333; margin: 0; }
-        .admin-actions { display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; margin-bottom: 30px; }
-        .admin-actions .btn { background-color: #6c757d; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; transition: background-color 0.3s ease; }
-        .admin-actions .btn:hover { background-color: #5a6268; }
-        .admin-actions .btn-primary { background-color: #007bff; } .admin-actions .btn-primary:hover { background-color: #0056b3; }
-        .admin-actions .btn-success { background-color: #28a745; } .admin-actions .btn-success:hover { background-color: #218838; }
-        .admin-actions .btn-warning { background-color: #ffc107; color: #333; } .admin-actions .btn-warning:hover { background-color: #e0a800; }
-        .admin-actions .btn-danger { background-color: #dc3545; } .admin-actions .btn-danger:hover { background-color: #c82333; }
-        .filter-form { display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; margin-bottom: 20px; padding: 15px; border: 1px solid #eee; border-radius: 8px; background-color: #f9f9f9; }
-        .filter-form label { display: flex; align-items: center; gap: 5px; font-weight: bold; color: #555; }
-        .filter-form input[type="text"], .filter-form select { padding: 8px; border: 1px solid #ccc; border-radius: 5px; font-size: 0.9em; }
-        .filter-form button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-size: 1em; transition: background-color 0.3s ease; }
-        .filter-form button:hover { background-color: #0056b3; }
+        .stat-card { background-color: #e9f5ff; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        .stat-card h3 { color: #0056b3; margin-top: 0; margin-bottom: 10px; font-size: 1.2em; }
+        .stat-card p { font-size: 1.8em; font-weight: bold; color: #007bff; margin: 0; }
+        .admin-actions { text-align: center; margin-bottom: 30px; }
+        .admin-actions button, .admin-actions a { display: inline-block; padding: 10px 20px; margin: 5px; border-radius: 5px; text-decoration: none; font-weight: bold; cursor: pointer; transition: background-color 0.3s ease; border: none; }
+        .btn-sync { background-color: #ffc107; color: #333; }
+        .btn-sync:hover { background-color: #e0a800; }
+        .btn-backup { background-color: #17a2b8; color: white; }
+        .btn-backup:hover { background-color: #138496; }
+        .btn-export { background-color: #28a745; color: white; }
+        .btn-export:hover { background-color: #218838; }
+        .filters-form { display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; margin-bottom: 20px; padding: 15px; background-color: #f8f8f8; border-radius: 8px; }
+        .filters-form label { font-weight: bold; color: #555; display: flex; align-items: center; gap: 5px; }
+        .filters-form input[type="text"], .filters-form select { padding: 8px; border: 1px solid #ccc; border-radius: 5px; font-size: 0.95em; }
+        .filters-form button { padding: 8px 15px; background-color: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: background-color 0.3s ease; }
+        .filters-form button:hover { background-color: #0056b3; }
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; font-size: 0.9em; }
-        th { background-color: #f2f2f2; font-weight: bold; color: #333; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; font-size: 0.9em; }
+        th { background-color: #f8f8f8; color: #555; font-weight: bold; }
         tr:nth-child(even) { background-color: #f9f9f9; }
-        tr:hover { background-color: #f1f1f1; }
-        .action-form { display: inline-block; margin: 0 5px; }
-        .action-form button { padding: 8px 12px; border-radius: 5px; border: none; cursor: pointer; font-size: 0.85em; }
-        .action-form .btn-approve { background-color: #28a745; color: white; }
-        .action-form .btn-deny { background-color: #dc3545; color: white; }
-        .action-form .btn-delete { background-color: #6c757d; color: white; }
-        .action-form .btn-promote { background-color: #007bff; color: white; }
-        .action-form .btn-demote { background-color: #ffc107; color: #333; }
-        .form-section { background-color: #f9f9f9; border-radius: 8px; padding: 20px; margin-top: 30px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
-        .form-section h3 { color: #007bff; margin-top: 0; margin-bottom: 20px; text-align: center; }
-        .form-section form { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
-        .form-section form label { font-weight: bold; color: #555; display: block; margin-bottom: 5px; }
-        .form-section form input[type="text"],
-        .form-section form input[type="number"],
-        .form-section form input[type="url"],
-        .form-section form select {
-            padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 0.95em; width: 100%; box-sizing: border-box;
-        }
-        .form-section form button {
-            background-color: #28a745; color: white; padding: 12px 20px; border: none; border-radius: 5px;
-            font-size: 1em; cursor: pointer; transition: background-color 0.3s ease; grid-column: 1 / -1; margin-top: 10px;
-        }
-        .form-section form button:hover { background-color: #218838; }
-        footer { background-color: #343a40; color: white; text-align: center; padding: 15px 20px; margin-top: 40px; font-size: 0.9em; }
-        @media (max-width: 768px) {
-            .stats-grid, .filter-form, .form-section form { grid-template-columns: 1fr; }
-            .admin-actions { flex-direction: column; align-items: stretch; }
-            .admin-actions .btn { width: 100%; }
-        }
+        .action-form { display: inline-block; margin-right: 5px; }
+        .action-form button { padding: 6px 10px; border-radius: 4px; font-size: 0.85em; cursor: pointer; border: none; }
+        .btn-promote { background-color: #007bff; color: white; }
+        .btn-promote:hover { background-color: #0056b3; }
+        .btn-demote { background-color: #6c757d; color: white; }
+        .btn-demote:hover { background-color: #5a6268; }
+        .btn-delete { background-color: #dc3545; color: white; }
+        .btn-delete:hover { background-color: #c82333; }
+        .btn-approve { background-color: #28a745; color: white; }
+        .btn-approve:hover { background-color: #218838; }
+        .btn-deny { background-color: #ffc107; color: #333; }
+        .btn-deny:hover { background-color: #e0a800; }
+        .form-section { background-color: #fdfdfd; padding: 25px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-top: 30px; }
+        .form-section form { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }
+        .form-section label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
+        .form-section input[type="text"], .form-section input[type="number"], .form-section input[type="url"], .form-section select { width: calc(100% - 20px); padding: 8px; border: 1px solid #ccc; border-radius: 5px; font-size: 0.95em; }
+        .form-section button { padding: 10px 20px; background-color: #007bff; color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; transition: background-color 0.3s ease; margin-top: 15px; }
+        .form-section button:hover { background-color: #0056b3; }
+        .form-section .full-width { grid-column: 1 / -1; }
+        .flash-message { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; border-radius: 5px; padding: 8px; margin-bottom: 15px; text-align: center; }
+        .back-link { display: block; text-align: center; margin-top: 30px; font-size: 1.05em; }
+        .back-link a { color: #007bff; text-decoration: none; transition: color 0.3s ease; }
+        .back-link a:hover { color: #0056b3; text-decoration: underline; }
     </style>
 </head>
 <body>
-    <header>
+    <div class="container">
         <h1>Painel Administrativo</h1>
-    </header>
-    <nav>
-        <a href="{{ url_for('index') }}">Home</a>
-        <a href="{{ url_for('reservar') }}">Reservar Miniaturas</a>
-        <a href="{{ url_for('admin') }}">Admin</a>
-        <a href="{{ url_for('profile') }}">Meu Perfil</a>
-        <a href="{{ url_for('logout') }}">Logout</a>
-    </nav>
-    <div class="flash-messages">
-        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% with messages = get_flashed_messages() %}
             {% if messages %}
-                {% for category, message in messages %}
-                    <div class="flash-{{ category }}">{{ message }}</div>
-                {% endfor %}
+                <div class="flash-message">
+                    {% for message in messages %}
+                        <p>{{ message }}</p>
+                    {% endfor %}
+                </div>
             {% endif %}
         {% endwith %}
-    </div>
-    <div class="container">
+
         <div class="stats-grid">
-            <div class="stat-card"><h3>Total Usuários</h3><p>{{ stats.users }}</p></div>
-            <div class="stat-card"><h3>Reservas Pendentes</h3><p>{{ stats.pending }}</p></div>
-            <div class="stat-card"><h3>Total Reservas</h3><p>{{ stats.total_res }}</p></div>
-            <div class="stat-card"><h3>Fila de Espera</h3><p>{{ stats.waiting }}</p></div>
+            <div class="stat-card"><h3>Usuários Registrados</h3><p>{{ stats.users }}</p></div>
+            <div class="stat-card"><h3>Reservas Pendentes</h3><p>{{ stats.pending_reservations }}</p></div>
+            <div class="stat-card"><h3>Total de Reservas</h3><p>{{ stats.total_reservations }}</p></div>
+            <div class="stat-card"><h3>Itens em Fila</h3><p>{{ stats.waiting_list_count }}</p></div>
         </div>
 
         <div class="admin-actions">
-            <form method="post" class="action-form">
+            <form method="post" style="display:inline-block;">
                 <input type="hidden" name="action" value="sync_stock">
-                <button type="submit" class="btn btn-warning">Sincronizar Estoque da Planilha</button>
+                <button type="submit" class="btn-sync">Sincronizar Estoque da Planilha</button>
             </form>
-            <a href="{{ url_for('backup_db') }}" class="btn btn-primary">Backup DB (JSON)</a>
-            <a href="{{ url_for('export_csv') }}" class="btn btn-primary">Export Reservas (CSV)</a>
+            <a href="{{ url_for('backup_db') }}" class="btn btn-backup">Backup DB (JSON)</a>
+            <a href="{{ url_for('export_csv') }}" class="btn btn-export">Export Reservas (CSV)</a>
         </div>
 
         <h2>Gerenciar Usuários</h2>
-        <form method="get" class="filter-form">
-            <label>Email: <input type="text" name="user_email_filter" value="{{ request.args.get('user_email_filter', '') }}" placeholder="Filtrar por email"></label>
-            <label>Role:
-                <select name="user_role_filter">
-                    <option value="">Todos</option>
-                    <option value="user" {% if request.args.get('user_role_filter') == 'user' %}selected{% endif %}>User</option>
-                    <option value="admin" {% if request.args.get('user_role_filter') == 'admin' %}selected{% endif %}>Admin</option>
-                </select>
-            </label>
-            <button type="submit">Filtrar Usuários</button>
-            <button type="button" onclick="window.location.href='{{ url_for('admin') }}'">Limpar Filtros</button>
-        </form>
+        <div class="filters-form">
+            <form method="get" action="{{ url_for('admin') }}">
+                <label>Email: <input type="text" name="user_email_filter" value="{{ request.args.get('user_email_filter', '') }}"></label>
+                <label>Role:
+                    <select name="user_role_filter">
+                        <option value="">Todos</option>
+                        <option value="user" {% if request.args.get('user_role_filter') == 'user' %}selected{% endif %}>User</option>
+                        <option value="admin" {% if request.args.get('user_role_filter') == 'admin' %}selected{% endif %}>Admin</option>
+                    </select>
+                </label>
+                <button type="submit">Filtrar Usuários</button>
+            </form>
+        </div>
         <table>
             <thead>
-                <tr><th>ID</th><th>Nome</th><th>Email</th><th>Telefone</th><th>Role</th><th>Ações</th></tr>
+                <tr><th>ID</th><th>Nome</th><th>Email</th><th>Telefone</th><th>Role</th><th>Membro Desde</th><th>Ações</th></tr>
             </thead>
             <tbody>
                 {% for user in users %}
@@ -847,26 +765,26 @@ ADMIN_HTML = '''
                         <td>{{ user.email }}</td>
                         <td>{{ user.phone }}</td>
                         <td>{{ user.role }}</td>
+                        <td>{{ user.data_cadastro }}</td>
                         <td>
-                            {% if user.id != session.get('user_id') %} {# Cannot modify self #}
+                            {% if user.role != 'admin' %}
                                 <form method="post" class="action-form">
                                     <input type="hidden" name="action" value="promote_user">
                                     <input type="hidden" name="user_id" value="{{ user.id }}">
                                     <button type="submit" class="btn-promote">Promover</button>
                                 </form>
+                            {% else %}
                                 <form method="post" class="action-form">
                                     <input type="hidden" name="action" value="demote_user">
                                     <input type="hidden" name="user_id" value="{{ user.id }}">
                                     <button type="submit" class="btn-demote">Rebaixar</button>
                                 </form>
-                                <form method="post" class="action-form" onsubmit="return confirm('Tem certeza que deseja deletar este usuário e suas reservas?');">
-                                    <input type="hidden" name="action" value="delete_user">
-                                    <input type="hidden" name="user_id" value="{{ user.id }}">
-                                    <button type="submit" class="btn-delete">Deletar</button>
-                                </form>
-                            {% else %}
-                                (Você)
                             {% endif %}
+                            <form method="post" class="action-form" onsubmit="return confirm('Tem certeza que deseja deletar este usuário e todas as suas reservas?');">
+                                <input type="hidden" name="action" value="delete_user">
+                                <input type="hidden" name="user_id" value="{{ user.id }}">
+                                <button type="submit" class="btn-delete">Deletar</button>
+                            </form>
                         </td>
                     </tr>
                 {% endfor %}
@@ -874,22 +792,23 @@ ADMIN_HTML = '''
         </table>
 
         <h2>Gerenciar Reservas</h2>
-        <form method="get" class="filter-form">
-            <label>Miniatura/Email: <input type="text" name="res_search_filter" value="{{ request.args.get('res_search_filter', '') }}" placeholder="Miniatura ou Email"></label>
-            <label>Status:
-                <select name="res_status_filter">
-                    <option value="">Todos</option>
-                    <option value="pending" {% if request.args.get('res_status_filter') == 'pending' %}selected{% endif %}>Pending</option>
-                    <option value="approved" {% if request.args.get('res_status_filter') == 'approved' %}selected{% endif %}>Approved</option>
-                    <option value="denied" {% if request.args.get('res_status_filter') == 'denied' %}selected{% endif %}>Denied</option>
-                </select>
-            </label>
-            <button type="submit">Filtrar Reservas</button>
-            <button type="button" onclick="window.location.href='{{ url_for('admin') }}'">Limpar Filtros</button>
-        </form>
+        <div class="filters-form">
+            <form method="get" action="{{ url_for('admin') }}">
+                <label>Serviço/Email: <input type="text" name="res_search_filter" value="{{ request.args.get('res_search_filter', '') }}"></label>
+                <label>Status:
+                    <select name="res_status_filter">
+                        <option value="">Todos</option>
+                        <option value="pending" {% if request.args.get('res_status_filter') == 'pending' %}selected{% endif %}>Pendente</option>
+                        <option value="approved" {% if request.args.get('res_status_filter') == 'approved' %}selected{% endif %}>Aprovada</option>
+                        <option value="denied" {% if request.args.get('res_status_filter') == 'denied' %}selected{% endif %}>Rejeitada</option>
+                    </select>
+                </label>
+                <button type="submit">Filtrar Reservas</button>
+            </form>
+        </div>
         <table>
             <thead>
-                <tr><th>ID</th><th>Usuário</th><th>Miniatura</th><th>Qtd</th><th>Status</th><th>Motivo Negação</th><th>Data Criação</th><th>Ações</th></tr>
+                <tr><th>ID</th><th>Usuário</th><th>Serviço</th><th>Quantidade</th><th>Status</th><th>Data Reserva</th><th>Motivo Rejeição</th><th>Ações</th></tr>
             </thead>
             <tbody>
                 {% for res in reservations %}
@@ -898,9 +817,9 @@ ADMIN_HTML = '''
                         <td>{{ res.user_email }}</td>
                         <td>{{ res.service }}</td>
                         <td>{{ res.quantity }}</td>
-                        <td>{{ res.status }}</td>
-                        <td>{{ res.denied_reason if res.denied_reason else '-' }}</td>
+                        <td>{{ res.status.capitalize() }}</td>
                         <td>{{ res.created_at }}</td>
+                        <td>{{ res.denied_reason if res.denied_reason else '-' }}</td>
                         <td>
                             {% if res.status == 'pending' %}
                                 <form method="post" class="action-form">
@@ -912,10 +831,10 @@ ADMIN_HTML = '''
                                     <input type="hidden" name="action" value="deny_res">
                                     <input type="hidden" name="res_id" value="{{ res.id }}">
                                     <input type="text" name="reason" placeholder="Motivo" required style="width: 80px;">
-                                    <button type="submit" class="btn-deny">Negar</button>
+                                    <button type="submit" class="btn-deny">Rejeitar</button>
                                 </form>
                             {% endif %}
-                            <form method="post" class="action-form" onsubmit="return confirm('Tem certeza que deseja deletar esta reserva? O estoque será restaurado.');">
+                            <form method="post" class="action-form" onsubmit="return confirm('Tem certeza que deseja deletar esta reserva?');">
                                 <input type="hidden" name="action" value="delete_res">
                                 <input type="hidden" name="res_id" value="{{ res.id }}">
                                 <button type="submit" class="btn-delete">Deletar</button>
@@ -929,7 +848,7 @@ ADMIN_HTML = '''
         <h2>Fila de Espera</h2>
         <table>
             <thead>
-                <tr><th>ID</th><th>Usuário</th><th>Miniatura</th><th>Data Entrada</th><th>Ações</th></tr>
+                <tr><th>ID</th><th>Usuário</th><th>Serviço</th><th>Data Entrada</th><th>Ações</th></tr>
             </thead>
             <tbody>
                 {% for item in waiting_list %}
@@ -939,16 +858,15 @@ ADMIN_HTML = '''
                         <td>{{ item.service }}</td>
                         <td>{{ item.created_at }}</td>
                         <td>
-                            <form method="post" class="action-form" onsubmit="return confirm('Tem certeza que deseja remover este item da fila?');">
-                                <input type="hidden" name="action" value="delete_waiting_item">
+                            <form method="post" class="action-form" onsubmit="return confirm('Notificar usuário e remover da fila?');">
+                                <input type="hidden" name="action" value="notify_waiting_list">
+                                <input type="hidden" name="item_id" value="{{ item.id }}">
+                                <button type="submit" class="btn-approve">Notificar</button>
+                            </form>
+                            <form method="post" class="action-form" onsubmit="return confirm('Remover da fila?');">
+                                <input type="hidden" name="action" value="delete_waiting_list">
                                 <input type="hidden" name="item_id" value="{{ item.id }}">
                                 <button type="submit" class="btn-delete">Remover</button>
-                            </form>
-                            {# Optional: Add a button to notify user via simulated log #}
-                            <form method="post" class="action-form">
-                                <input type="hidden" name="action" value="notify_waiting_user">
-                                <input type="hidden" name="item_id" value="{{ item.id }}">
-                                <button type="submit" class="btn btn-primary">Notificar</button>
                             </form>
                         </td>
                     </tr>
@@ -957,56 +875,51 @@ ADMIN_HTML = '''
         </table>
 
         <div class="form-section">
-            <h3>Inserir Nova Miniatura (Adiciona ao Estoque)</h3>
+            <h2>Inserir Nova Miniatura</h2>
             <form method="post">
                 <input type="hidden" name="action" value="insert_miniature">
-                <label>Nome da Miniatura: <input type="text" name="service" required></label>
-                <label>Marca/Fabricante: <input type="text" name="marca" required></label>
+                <label>Serviço: <input type="text" name="service" required></label>
+                <label>Marca: <input type="text" name="marca" required></label>
                 <label>Observações: <input type="text" name="obs"></label>
                 <label>Preço: <input type="number" name="price" step="0.01" required></label>
-                <label>Quantidade Inicial: <input type="number" name="quantity" min="0" required></label>
-                <label>URL da Imagem: <input type="url" name="image" required></label>
+                <label>Quantidade Inicial: <input type="number" name="quantity" required min="0"></label>
+                <label>Imagem URL: <input type="url" name="image" required></label>
                 <label>Previsão de Chegada: <input type="text" name="previsao"></label>
-                <button type="submit">Adicionar Miniatura</button>
+                <div class="full-width"><button type="submit">Inserir Miniatura</button></div>
             </form>
         </div>
 
         <div class="form-section">
-            <h3>Inserir Nova Reserva (Manual)</h3>
+            <h2>Inserir Nova Reserva</h2>
             <form method="post">
                 <input type="hidden" name="action" value="insert_reservation">
                 <label>Usuário:
                     <select name="user_id" required>
                         <option value="">Selecione um Usuário</option>
-                        {% for u in all_users_for_select %}
-                            <option value="{{ u.id }}">{{ u.name }} ({{ u.email }})</option>
-                        {% endfor %}
+                        {% for u in all_users %}<option value="{{ u.id }}">{{ u.email }}</option>{% endfor %}
                     </select>
                 </label>
-                <label>Miniatura:
+                <label>Serviço:
                     <select name="service" required>
-                        <option value="">Selecione uma Miniatura</option>
-                        {% for s in all_services_for_select %}
-                            <option value="{{ s.service }}">{{ s.service }} (Estoque: {{ s.quantity }})</option>
-                        {% endfor %}
+                        <option value="">Selecione um Serviço</option>
+                        {% for s in all_services %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
                     </select>
                 </label>
-                <label>Quantidade: <input type="number" name="quantity" min="1" required></label>
+                <label>Quantidade: <input type="number" name="quantity" required min="1"></label>
                 <label>Status:
                     <select name="status">
-                        <option value="pending">Pending</option>
-                        <option value="approved">Approved</option>
-                        <option value="denied">Denied</option>
+                        <option value="pending">Pendente</option>
+                        <option value="approved">Aprovada</option>
+                        <option value="denied">Rejeitada</option>
                     </select>
                 </label>
-                <label>Motivo (se negado): <input type="text" name="reason"></label>
-                <button type="submit">Criar Reserva</button>
+                <label>Motivo (se rejeitada): <input type="text" name="reason"></label>
+                <div class="full-width"><button type="submit">Criar Reserva</button></div>
             </form>
         </div>
+        
+        <p class="back-link"><a href="{{ url_for('index') }}">Voltar para Home</a></p>
     </div>
-    <footer>
-        <p>&copy; {{ datetime.now().year }} JG MINIS. Todos os direitos reservados.</p>
-    </footer>
 </body>
 </html>
 '''
@@ -1021,23 +934,23 @@ def index():
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
-        name = request.form.get('name', '').strip()
-        email = request.form.get('email', '').strip().lower()
-        phone = request.form.get('phone', '').strip()
-        password = request.form.get('password', '')
+        name = request.form['name'].strip()
+        email = request.form['email'].strip().lower()
+        phone = request.form['phone'].strip()
+        password = request.form['password']
 
         if not name:
             flash('Nome é obrigatório.', 'error')
-            return render_template_string(REGISTER_HTML, request=request, datetime=datetime)
+            return render_template_string(REGISTER_HTML)
         if not is_valid_email(email):
             flash('Email inválido.', 'error')
-            return render_template_string(REGISTER_HTML, request=request, datetime=datetime)
+            return render_template_string(REGISTER_HTML)
         if not is_valid_phone(phone):
-            flash('Telefone inválido (apenas números, 10 ou 11 dígitos).', 'error')
-            return render_template_string(REGISTER_HTML, request=request, datetime=datetime)
+            flash('Telefone inválido (deve conter 10 ou 11 dígitos numéricos).', 'error')
+            return render_template_string(REGISTER_HTML)
         if len(password) < 6:
-            flash('A senha deve ter pelo menos 6 caracteres.', 'error')
-            return render_template_string(REGISTER_HTML, request=request, datetime=datetime)
+            flash('Senha deve ter pelo menos 6 caracteres.', 'error')
+            return render_template_string(REGISTER_HTML)
         
         hashed_pw = generate_password_hash(password)
         conn = sqlite3.connect(DATABASE)
@@ -1045,44 +958,46 @@ def register():
         try:
             c.execute('INSERT INTO users (name, email, phone, password) VALUES (?, ?, ?, ?)', (name, email, phone, hashed_pw))
             conn.commit()
+            logging.info(f'Novo usuário registrado: {email}')
             flash('Registro realizado com sucesso! Faça login.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError:
-            flash('Este email já está cadastrado.', 'error')
+            flash('Email já cadastrado. Por favor, use outro email ou faça login.', 'error')
         except Exception as e:
-            logging.error(f'Erro ao registrar usuário: {e}')
+            logging.error(f'Erro ao registrar usuário {email}: {e}')
             flash('Ocorreu um erro ao registrar. Tente novamente.', 'error')
         finally:
             conn.close()
-    return render_template_string(REGISTER_HTML, request=request, datetime=datetime)
+    return render_template_string(REGISTER_HTML)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        email = request.form.get('email', '').strip().lower()
-        password = request.form.get('password', '')
-        
+        email = request.form['email'].strip().lower()
+        password = request.form['password']
+
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
         c.execute('SELECT id, password, role, email FROM users WHERE email = ?', (email,))
-        user_data = c.fetchone()
+        user = c.fetchone()
         conn.close()
 
-        if user_data and check_password_hash(user_data[1], password):
-            session['user_id'] = user_data[0]
-            session['role'] = user_data[2]
-            session['email'] = user_data[3]
-            logging.info(f'Login bem-sucedido para {email}')
+        if user and check_password_hash(user[1], password):
+            session['user_id'] = user[0]
+            session['role'] = user[2]
+            session['email'] = user[3]
+            logging.info(f'Login bem-sucedido para: {email}')
             flash('Login realizado com sucesso!', 'success')
             return redirect(url_for('index'))
         else:
-            flash('Email ou senha inválidos.', 'error')
-    return render_template_string(LOGIN_HTML, request=request, datetime=datetime)
+            flash('Email ou senha inválidos. Tente novamente.', 'error')
+    return render_template_string(LOGIN_HTML)
 
 @app.route('/logout')
 def logout():
-    logging.info(f'Logout de {session.get("email", "usuário desconhecido")}')
+    user_email = session.get('email', 'usuário desconhecido')
     session.clear()
+    logging.info(f'Logout de: {user_email}')
     flash('Você foi desconectado.', 'success')
     return redirect(url_for('index'))
 
@@ -1091,347 +1006,166 @@ def profile():
     if 'user_id' not in session:
         flash('Você precisa estar logado para acessar esta página.', 'error')
         return redirect(url_for('login'))
-    
+
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     
-    # Get user info
+    # Get user details
     c.execute('SELECT name, email, phone, data_cadastro FROM users WHERE id = ?', (session['user_id'],))
-    user = c.fetchone()
-    user_dict = {'name': user[0], 'email': user[1], 'phone': user[2], 'data_cadastro': user[3]}
+    user_data = c.fetchone()
+    user = {
+        'name': user_data[0],
+        'email': user_data[1],
+        'phone': user_data[2],
+        'data_cadastro': user_data[3]
+    }
 
-    # Get user's reservations
-    c.execute('SELECT service, quantity, status, created_at FROM reservations WHERE user_id = ? ORDER BY created_at DESC', (session['user_id'],))
-    reservations = [{'service': r[0], 'quantity': r[1], 'status': r[2], 'created_at': r[3]} for r in c.fetchall()]
-    
+    # Get user reservations
+    c.execute('''SELECT service, quantity, status, denied_reason, created_at 
+                 FROM reservations WHERE user_id = ? ORDER BY created_at DESC''', (session['user_id'],))
+    reservations = []
+    for res in c.fetchall():
+        reservations.append({
+            'service': res[0],
+            'quantity': res[1],
+            'status': res[2],
+            'denied_reason': res[3],
+            'created_at': res[4]
+        })
     conn.close()
-    return render_template_string(PROFILE_HTML, user=user_dict, reservations=reservations, session=session, url_for=url_for, datetime=datetime)
-
-@app.route('/reserve_single/<service>', methods=['GET', 'POST'])
-def reserve_single(service):
-    if 'user_id' not in session:
-        flash('Você precisa estar logado para reservar.', 'error')
-        return redirect(url_for('login'))
     
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    
-    # Get thumbnail details
-    thumbnails = load_thumbnails()
-    thumb = next((t for t in thumbnails if t['service'] == service), None)
-    if not thumb:
-        flash('Miniatura não encontrada.', 'error')
-        conn.close()
-        return redirect(url_for('index'))
-    
-    # Get current stock from DB
-    c.execute('SELECT quantity FROM stock WHERE service = ?', (service,))
-    stock_row = c.fetchone()
-    current_stock = stock_row[0] if stock_row else 0
-    
-    if request.method == 'POST':
-        quantity_to_reserve = int(request.form.get('quantity', 0))
-        
-        if quantity_to_reserve <= 0:
-            flash('A quantidade deve ser pelo menos 1.', 'error')
-        elif quantity_to_reserve > current_stock:
-            flash(f'Quantidade indisponível. Restam apenas {current_stock} unidades.', 'error')
-        else:
-            try:
-                c.execute('INSERT INTO reservations (user_id, service, quantity) VALUES (?, ?, ?)',
-                          (session['user_id'], service, quantity_to_reserve))
-                c.execute('UPDATE stock SET quantity = quantity - ? WHERE service = ?', (quantity_to_reserve, service))
-                conn.commit()
-                flash(f'{quantity_to_reserve} unidade(s) de "{service}" reservada(s) com sucesso!', 'success')
-                return redirect(url_for('profile'))
-            except Exception as e:
-                logging.error(f'Erro ao criar reserva individual: {e}')
-                flash('Ocorreu um erro ao processar sua reserva. Tente novamente.', 'error')
-        
-    conn.close()
-    return render_template_string(RESERVE_SINGLE_HTML, thumb=thumb, current_stock=current_stock, 
-                                  logo_url=LOGO_URL, whatsapp_number=WHATSAPP_NUMBER, session=session, url_for=url_for, datetime=datetime)
+    return render_template_string(PROFILE_HTML, user=user, reservations=reservations)
 
 @app.route('/reservar', methods=['GET', 'POST'])
 def reservar():
     if 'user_id' not in session:
-        flash('Você precisa estar logado para reservar.', 'error')
+        flash('Você precisa estar logado para reservar miniaturas.', 'error')
         return redirect(url_for('login'))
-    
+
     all_thumbnails = load_thumbnails()
-    filtered_thumbnails = all_thumbnails
-
-    # --- Apply Filters ---
-    available_only = request.args.get('available') == '1'
-    order_by = request.args.get('order_by', '')
-    marca_filter = request.args.get('marca', '').strip().lower()
-
-    if available_only:
-        filtered_thumbnails = [t for t in filtered_thumbnails if t['quantity'] > 0]
     
-    if marca_filter:
-        filtered_thumbnails = [t for t in filtered_thumbnails if marca_filter in t['marca'].lower()]
+    if request.method == 'GET':
+        # Apply filters
+        filtered_thumbnails = all_thumbnails
+        
+        if request.args.get('available'):
+            filtered_thumbnails = [t for t in filtered_thumbnails if t['quantity'] > 0]
+        
+        previsao_filter = request.args.get('previsao', '').lower()
+        if previsao_filter:
+            filtered_thumbnails = [t for t in filtered_thumbnails if previsao_filter in t['previsao'].lower()]
+            
+        marca_filter = request.args.get('marca', '').lower()
+        if marca_filter:
+            filtered_thumbnails = [t for t in filtered_thumbnails if marca_filter in t['marca'].lower()]
+            
+        order_by = request.args.get('order_by', '')
+        if order_by == 'service_asc':
+            filtered_thumbnails.sort(key=lambda x: x['service'].lower())
+        elif order_by == 'service_desc':
+            filtered_thumbnails.sort(key=lambda x: x['service'].lower(), reverse=True)
+        elif order_by == 'price_asc':
+            filtered_thumbnails.sort(key=lambda x: float(x['price'].replace(',', '.')))
+        elif order_by == 'price_desc':
+            filtered_thumbnails.sort(key=lambda x: float(x['price'].replace(',', '.')), reverse=True)
 
-    # --- Apply Sorting ---
-    if order_by == 'service_asc':
-        filtered_thumbnails.sort(key=lambda x: x['service'])
-    elif order_by == 'service_desc':
-        filtered_thumbnails.sort(key=lambda x: x['service'], reverse=True)
-    elif order_by == 'price_asc':
-        filtered_thumbnails.sort(key=lambda x: float(x['price'].replace(',', '.')))
-    elif order_by == 'price_desc':
-        filtered_thumbnails.sort(key=lambda x: float(x['price'].replace(',', '.')), reverse=True)
-    elif order_by == 'previsao_asc':
-        # Sort by date, empty strings last
-        filtered_thumbnails.sort(key=lambda x: (x['previsao'] == '', x['previsao']))
-    elif order_by == 'previsao_desc':
-        # Sort by date, empty strings first
-        filtered_thumbnails.sort(key=lambda x: (x['previsao'] != '', x['previsao']), reverse=True)
-
-    if request.method == 'POST':
-        services_selected = request.form.getlist('services')
+        return render_template_string(RESERVAR_HTML, thumbnails=filtered_thumbnails, logo_url=LOGO_URL, whatsapp_number=WHATSAPP_NUMBER)
+    
+    else: # POST request for reservations
+        user_id = session['user_id']
         reservations_made = 0
         conn = sqlite3.connect(DATABASE)
         c = conn.cursor()
-        
-        for service_name in services_selected:
-            quantity_key = f'quantity_{service_name}'
+
+        for thumb in all_thumbnails:
+            service = thumb['service']
+            # Get quantity from form for this service
+            quantity_key = f'quantity_{service}'
             quantity_to_reserve = int(request.form.get(quantity_key, 0))
-            
-            if quantity_to_reserve <= 0:
-                flash(f'Quantidade inválida para "{service_name}".', 'error')
-                continue
 
-            # Get current stock from DB
-            c.execute('SELECT quantity FROM stock WHERE service = ?', (service_name,))
-            stock_row = c.fetchone()
-            current_stock = stock_row[0] if stock_row else 0
+            if quantity_to_reserve > 0:
+                # Check current stock in DB
+                c.execute('SELECT quantity FROM stock WHERE service = ?', (service.lower(),)) # Use lower for lookup
+                current_stock_row = c.fetchone()
+                current_stock = current_stock_row[0] if current_stock_row else 0
 
-            if quantity_to_reserve > current_stock:
-                flash(f'Estoque insuficiente para "{service_name}". Disponível: {current_stock}.', 'error')
-            else:
-                try:
-                    c.execute('INSERT INTO reservations (user_id, service, quantity) VALUES (?, ?, ?)',
-                              (session['user_id'], service_name, quantity_to_reserve))
-                    c.execute('UPDATE stock SET quantity = quantity - ? WHERE service = ?', (quantity_to_reserve, service_name))
-                    conn.commit()
+                if quantity_to_reserve <= current_stock:
+                    # Make reservation
+                    c.execute('INSERT INTO reservations (user_id, service, quantity) VALUES (?, ?, ?)', 
+                              (user_id, service, quantity_to_reserve))
+                    # Update stock
+                    c.execute('UPDATE stock SET quantity = quantity - ? WHERE service = ?', 
+                              (quantity_to_reserve, service.lower())) # Use lower for update
                     reservations_made += 1
-                except Exception as e:
-                    logging.error(f'Erro ao criar reserva múltipla para {service_name}: {e}')
-                    flash(f'Erro ao reservar "{service_name}".', 'error')
+                    logging.info(f'Reserva de {quantity_to_reserve}x {service} feita por user {user_id}')
+                else:
+                    flash(f'Não foi possível reservar {quantity_to_reserve}x {service}. Estoque insuficiente (disponível: {current_stock}).', 'error')
         
+        conn.commit()
         conn.close()
+
         if reservations_made > 0:
             flash(f'{reservations_made} reserva(s) realizada(s) com sucesso!', 'success')
             return redirect(url_for('profile'))
         else:
-            flash('Nenhuma reserva foi feita.', 'error')
+            flash('Nenhuma reserva foi feita. Verifique as quantidades e o estoque.', 'error')
+            return redirect(url_for('reservar'))
 
-    return render_template_string(RESERVAR_HTML, thumbnails=filtered_thumbnails, logo_url=LOGO_URL, 
-                                  whatsapp_number=WHATSAPP_NUMBER, session=session, url_for=url_for, datetime=datetime, request=request)
-
-@app.route('/admin', methods=['GET', 'POST'])
-def admin():
-    if session.get('role') != 'admin':
-        flash('Acesso negado. Você não tem permissão de administrador.', 'error')
-        return redirect(url_for('index'))
+@app.route('/reserve_single', methods=['GET', 'POST'])
+def reserve_single():
+    if 'user_id' not in session:
+        flash('Você precisa estar logado para reservar miniaturas.', 'error')
+        return redirect(url_for('login'))
     
+    service_name = request.args.get('service')
+    if not service_name:
+        flash('Serviço não especificado.', 'error')
+        return redirect(url_for('index'))
+
+    # Find thumbnail details
+    all_thumbnails = load_thumbnails()
+    thumb = next((t for t in all_thumbnails if t['service'] == service_name), None)
+    
+    if not thumb:
+        flash('Miniatura não encontrada.', 'error')
+        return redirect(url_for('index'))
+
+    # Get current stock from DB
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
+    c.execute('SELECT quantity FROM stock WHERE service = ?', (service_name.lower(),)) # Use lower for lookup
+    stock_row = c.fetchone()
+    current_stock = stock_row[0] if stock_row else 0
+    conn.close()
+
+    thumb['quantity'] = current_stock # Ensure UI shows current stock
 
     if request.method == 'POST':
-        action = request.form.get('action')
-        
-        # --- User Management Actions ---
-        if action == 'promote_user':
-            user_id = request.form.get('user_id')
-            c.execute('UPDATE users SET role = "admin" WHERE id = ?', (user_id,))
-            flash(f'Usuário {user_id} promovido a admin.', 'success')
-        elif action == 'demote_user':
-            user_id = request.form.get('user_id')
-            c.execute('UPDATE users SET role = "user" WHERE id = ?', (user_id,))
-            flash(f'Usuário {user_id} rebaixado para user.', 'success')
-        elif action == 'delete_user':
-            user_id = request.form.get('user_id')
-            # Delete associated reservations and waiting list entries first
-            c.execute('DELETE FROM reservations WHERE user_id = ?', (user_id,))
-            c.execute('DELETE FROM waiting_list WHERE user_id = ?', (user_id,))
-            c.execute('DELETE FROM users WHERE id = ?', (user_id,))
-            flash(f'Usuário {user_id} e suas reservas/fila deletados.', 'success')
-        
-        # --- Reservation Management Actions ---
-        elif action == 'approve_res':
-            res_id = request.form.get('res_id')
-            c.execute('UPDATE reservations SET status = "approved", approved_by = ? WHERE id = ?', (session['user_id'], res_id))
-            flash(f'Reserva {res_id} aprovada.', 'success')
-        elif action == 'deny_res':
-            res_id = request.form.get('res_id')
-            reason = request.form.get('reason', 'Motivo não especificado')
-            c.execute('UPDATE reservations SET status = "denied", denied_reason = ? WHERE id = ?', (reason, res_id))
-            flash(f'Reserva {res_id} negada.', 'success')
-        elif action == 'delete_res':
-            res_id = request.form.get('res_id')
-            # Get quantity from reservation to restore stock
-            c.execute('SELECT service, quantity FROM reservations WHERE id = ?', (res_id,))
-            res_data = c.fetchone()
-            if res_data:
-                service, quantity = res_data
-                c.execute('UPDATE stock SET quantity = quantity + ? WHERE service = ?', (quantity, service))
-                flash(f'Estoque de "{service}" restaurado em {quantity} unidades.', 'success')
-            c.execute('DELETE FROM reservations WHERE id = ?', (res_id,))
-            flash(f'Reserva {res_id} deletada.', 'success')
-        
-        # --- Miniature Management Actions ---
-        elif action == 'insert_miniature':
-            service = request.form.get('service', '').strip()
-            marca = request.form.get('marca', '').strip()
-            obs = request.form.get('obs', '').strip()
-            price = float(request.form.get('price', 0))
-            quantity = int(request.form.get('quantity', 0))
-            image = request.form.get('image', '').strip()
-            previsao = request.form.get('previsao', '').strip()
+        quantity_to_reserve = int(request.form.get('quantity', 0))
 
-            if not service or not marca or price <= 0 or quantity < 0 or not image:
-                flash('Preencha todos os campos obrigatórios para a miniatura.', 'error')
-            else:
-                try:
-                    # Insert/Update into stock DB
-                    c.execute('INSERT OR REPLACE INTO stock (service, quantity, last_sync) VALUES (?, ?, CURRENT_TIMESTAMP)', (service, quantity))
-                    # Note: This does NOT update the Google Sheet. Sheet is primary source for other details.
-                    flash(f'Miniatura "{service}" adicionada/atualizada no estoque.', 'success')
-                except Exception as e:
-                    logging.error(f'Erro ao inserir miniatura: {e}')
-                    flash('Erro ao adicionar miniatura. Tente novamente.', 'error')
-
-        # --- Manual Reservation Insertion ---
-        elif action == 'insert_reservation':
-            user_id = request.form.get('user_id')
-            service = request.form.get('service')
-            quantity = int(request.form.get('quantity', 0))
-            status = request.form.get('status', 'pending')
-            reason = request.form.get('reason', '').strip()
-
-            if not user_id or not service or quantity <= 0:
-                flash('Preencha todos os campos obrigatórios para a reserva manual.', 'error')
-            else:
-                try:
-                    # Check stock if approved
-                    if status == 'approved':
-                        c.execute('SELECT quantity FROM stock WHERE service = ?', (service,))
-                        current_stock = c.fetchone()
-                        if not current_stock or current_stock[0] < quantity:
-                            flash(f'Estoque insuficiente para "{service}" para aprovar a reserva.', 'error')
-                            conn.rollback() # Rollback any changes
-                            conn.close()
-                            return redirect(url_for('admin'))
-                        c.execute('UPDATE stock SET quantity = quantity - ? WHERE service = ?', (quantity, service))
-                    
-                    c.execute('INSERT INTO reservations (user_id, service, quantity, status, denied_reason) VALUES (?, ?, ?, ?, ?)',
-                              (user_id, service, quantity, status, reason if status == 'denied' else None))
-                    conn.commit()
-                    flash(f'Reserva manual para "{service}" criada com sucesso!', 'success')
-                except Exception as e:
-                    logging.error(f'Erro ao inserir reserva manual: {e}')
-                    flash('Erro ao criar reserva manual. Tente novamente.', 'error')
-
-        # --- Stock Synchronization ---
-        elif action == 'sync_stock':
-            if sheet:
-                try:
-                    records = sheet.get_all_records()
-                    for record in records:
-                        service = record.get('NOME DA MINIATURA', '')
-                        qty = record.get('QUANTIDADE DISPONIVEL', 0)
-                        if service:
-                            c.execute('INSERT OR REPLACE INTO stock (service, quantity, last_sync) VALUES (?, ?, CURRENT_TIMESTAMP)', (service, qty))
-                    conn.commit()
-                    flash('Estoque sincronizado da planilha para o DB!', 'success')
-                except Exception as e:
-                    logging.error(f'Erro na sincronização do estoque: {e}')
-                    flash('Erro na sincronização do estoque. Verifique a planilha e as permissões.', 'error')
-            else:
-                flash('Integração com Google Sheets não configurada.', 'error')
-        
-        # --- Waiting List Actions ---
-        elif action == 'delete_waiting_item':
-            item_id = request.form.get('item_id')
-            c.execute('DELETE FROM waiting_list WHERE id = ?', (item_id,))
-            flash(f'Item da fila de espera {item_id} removido.', 'success')
-        elif action == 'notify_waiting_user':
-            item_id = request.form.get('item_id')
-            c.execute('SELECT u.email, wl.service FROM waiting_list wl JOIN users u ON wl.user_id = u.id WHERE wl.id = ?', (item_id,))
-            notification_data = c.fetchone()
-            if notification_data:
-                user_email, service_name = notification_data
-                logging.info(f'Notificação simulada para {user_email}: Miniatura "{service_name}" está disponível!')
-                flash(f'Notificação simulada enviada para {user_email} sobre "{service_name}".', 'success')
-            else:
-                flash('Item da fila de espera não encontrado para notificação.', 'error')
-
-        conn.commit() # Commit any pending changes
-        return redirect(url_for('admin')) # Redirect to clear POST data
-
-    # --- Admin Dashboard Data Loading (GET request) ---
+        if quantity_to_reserve <= 0:
+            flash('Quantidade inválida. Deve ser pelo menos 1.', 'error')
+        elif quantity_to_reserve > current_stock:
+            flash(f'Quantidade insuficiente no estoque. Disponível: {current_stock}.', 'error')
+        else:
+            conn = sqlite3.connect(DATABASE)
+            c = conn.cursor()
+            try:
+                c.execute('INSERT INTO reservations (user_id, service, quantity) VALUES (?, ?, ?)', 
+                          (session['user_id'], service_name, quantity_to_reserve))
+                c.execute('UPDATE stock SET quantity = quantity - ? WHERE service = ?', 
+                          (quantity_to_reserve, service_name.lower())) # Use lower for update
+                conn.commit()
+                logging.info(f'Reserva de {quantity_to_reserve}x {service_name} feita por user {session["user_id"]}')
+                flash(f'{quantity_to_reserve}x {service_name} reservada(s) com sucesso!', 'success')
+                return redirect(url_for('profile'))
+            except Exception as e:
+                logging.error(f'Erro ao fazer reserva para {service_name}: {e}')
+                flash('Ocorreu um erro ao processar sua reserva. Tente novamente.', 'error')
+            finally:
+                conn.close()
     
-    # Stats
-    c.execute('SELECT COUNT(*) FROM users')
-    users_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM reservations WHERE status = "pending"')
-    pending_res_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM reservations')
-    total_res_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM waiting_list')
-    waiting_list_count = c.fetchone()[0]
-    stats = {'users': users_count, 'pending': pending_res_count, 'total_res': total_res_count, 'waiting': waiting_list_count}
-
-    # User Filtering
-    user_email_filter = request.args.get('user_email_filter', '').strip().lower()
-    user_role_filter = request.args.get('user_role_filter', '').strip()
-    user_query = 'SELECT id, name, email, phone, role, data_cadastro FROM users WHERE 1=1'
-    user_params = []
-    if user_email_filter:
-        user_query += ' AND email LIKE ?'
-        user_params.append(f'%{user_email_filter}%')
-    if user_role_filter:
-        user_query += ' AND role = ?'
-        user_params.append(user_role_filter)
-    c.execute(user_query, user_params)
-    users = [{'id': r[0], 'name': r[1], 'email': r[2], 'phone': r[3], 'role': r[4], 'data_cadastro': r[5]} for r in c.fetchall()]
-
-    # Reservation Filtering
-    res_search_filter = request.args.get('res_search_filter', '').strip().lower()
-    res_status_filter = request.args.get('res_status_filter', '').strip()
-    res_query = '''
-        SELECT r.id, u.email, r.service, r.quantity, r.status, r.denied_reason, r.created_at 
-        FROM reservations r JOIN users u ON r.user_id = u.id WHERE 1=1
-    '''
-    res_params = []
-    if res_search_filter:
-        res_query += ' AND (u.email LIKE ? OR r.service LIKE ?)'
-        res_params.extend([f'%{res_search_filter}%', f'%{res_search_filter}%'])
-    if res_status_filter:
-        res_query += ' AND r.status = ?'
-        res_params.append(res_status_filter)
-    res_query += ' ORDER BY r.created_at DESC'
-    c.execute(res_query, res_params)
-    reservations = [{'id': r[0], 'user_email': r[1], 'service': r[2], 'quantity': r[3], 
-                     'status': r[4], 'denied_reason': r[5], 'created_at': r[6]} for r in c.fetchall()]
-
-    # Waiting List
-    c.execute('SELECT wl.id, u.email, wl.service, wl.created_at FROM waiting_list wl JOIN users u ON wl.user_id = u.id ORDER BY wl.created_at ASC')
-    waiting_list = [{'id': r[0], 'user_email': r[1], 'service': r[2], 'created_at': r[3]} for r in c.fetchall()]
-
-    # Data for "Insert New Reservation" form
-    all_users_for_select = c.execute('SELECT id, name, email FROM users ORDER BY name').fetchall()
-    all_users_for_select = [{'id': r[0], 'name': r[1], 'email': r[2]} for r in all_users_for_select]
-    
-    all_services_for_select = c.execute('SELECT service, quantity FROM stock ORDER BY service').fetchall()
-    all_services_for_select = [{'service': r[0], 'quantity': r[1]} for r in all_services_for_select]
-
-    conn.close()
-    return render_template_string(ADMIN_HTML, stats=stats, users=users, reservations=reservations, 
-                                  waiting_list=waiting_list, all_users_for_select=all_users_for_select, 
-                                  all_services_for_select=all_services_for_select, session=session, url_for=url_for, datetime=datetime, request=request)
+    return render_template_string(RESERVE_SINGLE_HTML, thumb=thumb, logo_url=LOGO_URL, whatsapp_number=WHATSAPP_NUMBER)
 
 @app.route('/add_to_waiting_list', methods=['POST'])
 def add_to_waiting_list():
@@ -1440,38 +1174,247 @@ def add_to_waiting_list():
         return redirect(url_for('login'))
     
     service = request.form.get('service')
+    user_id = session['user_id']
+    user_email = session.get('email', 'anônimo')
+
     if not service:
-        flash('Miniatura não especificada.', 'error')
+        flash('Serviço não especificado para a fila de espera.', 'error')
         return redirect(url_for('index'))
-    
+
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     try:
         # Check if user is already in waiting list for this service
-        c.execute('SELECT id FROM waiting_list WHERE user_id = ? AND service = ?', (session['user_id'], service))
+        c.execute('SELECT id FROM waiting_list WHERE user_id = ? AND service = ?', (user_id, service))
         if c.fetchone():
-            flash(f'Você já está na fila de espera para "{service}".', 'info')
+            flash(f'Você já está na fila de espera para {service}.', 'info')
         else:
-            c.execute('INSERT INTO waiting_list (user_id, service) VALUES (?, ?)', (session['user_id'], service))
+            c.execute('INSERT INTO waiting_list (user_id, service) VALUES (?, ?)', (user_id, service))
             conn.commit()
-            flash(f'Você foi adicionado à fila de espera para "{service}"!', 'success')
+            logging.info(f'Usuário {user_email} adicionado à fila de espera para {service}')
+            flash(f'Você foi adicionado à fila de espera para {service}!', 'success')
+            # Redirect to WhatsApp with pre-filled message
+            whatsapp_message = f"Olá, fui adicionado à fila de espera para {service}. Meu email é {user_email}."
+            return redirect(f"https://wa.me/{WHATSAPP_NUMBER}?text={whatsapp_message}")
     except Exception as e:
-        logging.error(f'Erro ao adicionar à fila de espera: {e}')
-        flash('Ocorreu um erro ao adicionar à fila de espera. Tente novamente.', 'error')
+        logging.error(f'Erro ao adicionar user {user_id} à fila para {service}: {e}')
+        flash('Ocorreu um erro ao adicionar você à fila de espera. Tente novamente.', 'error')
     finally:
         conn.close()
     
-    return redirect(url_for('index')) # Redirect back to home or relevant page
+    return redirect(url_for('index')) # Fallback redirect
+
+@app.route('/admin', methods=['GET', 'POST'])
+def admin():
+    if session.get('role') != 'admin':
+        flash('Acesso negado. Você não tem permissão de administrador.', 'error')
+        return redirect(url_for('index'))
+
+    conn = sqlite3.connect(DATABASE)
+    c = conn.cursor()
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        
+        if action == 'promote_user':
+            user_id = request.form.get('user_id')
+            c.execute('UPDATE users SET role = "admin" WHERE id = ?', (user_id,))
+            flash('Usuário promovido a administrador.', 'success')
+        elif action == 'demote_user':
+            user_id = request.form.get('user_id')
+            c.execute('UPDATE users SET role = "user" WHERE id = ?', (user_id,))
+            flash('Usuário rebaixado para user.', 'success')
+        elif action == 'delete_user':
+            user_id = request.form.get('user_id')
+            c.execute('DELETE FROM users WHERE id = ?', (user_id,))
+            c.execute('DELETE FROM reservations WHERE user_id = ?', (user_id,))
+            c.execute('DELETE FROM waiting_list WHERE user_id = ?', (user_id,))
+            flash('Usuário e todas as suas reservas/filas deletados.', 'success')
+        elif action == 'approve_res':
+            res_id = request.form.get('res_id')
+            c.execute('UPDATE reservations SET status = "approved", approved_by = ? WHERE id = ?', (session['user_id'], res_id))
+            flash('Reserva aprovada.', 'success')
+        elif action == 'deny_res':
+            res_id = request.form.get('res_id')
+            reason = request.form.get('reason', 'Motivo não especificado.')
+            c.execute('UPDATE reservations SET status = "denied", denied_reason = ? WHERE id = ?', (reason, res_id))
+            flash('Reserva rejeitada.', 'success')
+        elif action == 'delete_res':
+            res_id = request.form.get('res_id')
+            # Get quantity from reservation before deleting to restore stock
+            c.execute('SELECT service, quantity FROM reservations WHERE id = ?', (res_id,))
+            res_data = c.fetchone()
+            if res_data:
+                service_name = res_data[0]
+                quantity_reserved = res_data[1]
+                c.execute('UPDATE stock SET quantity = quantity + ? WHERE service = ?', (quantity_reserved, service_name.lower())) # Restore stock
+                logging.info(f'Estoque de {service_name} restaurado em {quantity_reserved} após exclusão da reserva {res_id}')
+            c.execute('DELETE FROM reservations WHERE id = ?', (res_id,))
+            flash('Reserva deletada e estoque restaurado.', 'success')
+        elif action == 'insert_miniature':
+            service = request.form.get('service')
+            marca = request.form.get('marca')
+            obs = request.form.get('obs')
+            price = float(request.form.get('price', 0))
+            quantity = int(request.form.get('quantity', 0))
+            image = request.form.get('image')
+            previsao = request.form.get('previsao')
+            
+            # Insert into stock table (case-insensitive service name)
+            c.execute('INSERT OR REPLACE INTO stock (service, quantity, last_sync) VALUES (?, ?, CURRENT_TIMESTAMP)', (service.lower(), quantity))
+            # Note: This does NOT update the Google Sheet. Sheet is primary source for other details.
+            flash(f'Miniatura "{service}" adicionada/atualizada no estoque local.', 'success')
+        elif action == 'insert_reservation':
+            user_id = request.form.get('user_id')
+            service = request.form.get('service')
+            quantity = int(request.form.get('quantity', 0))
+            status = request.form.get('status', 'pending')
+            reason = request.form.get('reason', '')
+
+            if not user_id or not service or quantity <= 0:
+                flash('Dados inválidos para nova reserva.', 'error')
+            else:
+                # Check stock before inserting if status is approved
+                if status == 'approved':
+                    c.execute('SELECT quantity FROM stock WHERE service = ?', (service.lower(),))
+                    current_stock = c.fetchone()
+                    if not current_stock or current_stock[0] < quantity:
+                        flash(f'Estoque insuficiente para aprovar {quantity}x {service}. Disponível: {current_stock[0] if current_stock else 0}.', 'error')
+                        conn.commit() # Commit any previous changes
+                        return redirect(url_for('admin')) # Redirect to avoid further processing
+                    c.execute('UPDATE stock SET quantity = quantity - ? WHERE service = ?', (quantity, service.lower()))
+                
+                c.execute('INSERT INTO reservations (user_id, service, quantity, status, denied_reason) VALUES (?, ?, ?, ?, ?)', 
+                          (user_id, service, quantity, status, reason))
+                flash('Nova reserva criada.', 'success')
+        elif action == 'sync_stock':
+            if sheet:
+                try:
+                    records = sheet.get_all_records()
+                    for record in records:
+                        service = record.get('NOME DA MINIATURA', '')
+                        qty = record.get('QUANTIDADE DISPONIVEL', 0)
+                        if service:
+                            # Normalize service name to lower for case-insensitive matching
+                            c.execute('INSERT OR REPLACE INTO stock (service, quantity, last_sync) VALUES (?, ?, CURRENT_TIMESTAMP)', (service.lower(), qty))
+                    flash('Estoque sincronizado da planilha para o DB!', 'success')
+                    logging.info('Estoque sincronizado via admin.')
+                except Exception as e:
+                    logging.error(f'Erro na sincronização de estoque via admin: {e}')
+                    flash('Erro na sincronização do estoque.', 'error')
+            else:
+                flash('Planilha não configurada ou inacessível.', 'error')
+        elif action == 'notify_waiting_list':
+            item_id = request.form.get('item_id')
+            c.execute('SELECT wl.service, u.email FROM waiting_list wl JOIN users u ON wl.user_id = u.id WHERE wl.id = ?', (item_id,))
+            item = c.fetchone()
+            if item:
+                service_name = item[0]
+                user_email = item[1]
+                logging.info(f'Notificação simulada para {user_email} sobre {service_name} da fila de espera.')
+                flash(f'Notificação simulada enviada para {user_email} sobre {service_name}.', 'success')
+                c.execute('DELETE FROM waiting_list WHERE id = ?', (item_id,))
+            else:
+                flash('Item da fila de espera não encontrado.', 'error')
+        elif action == 'delete_waiting_list':
+            item_id = request.form.get('item_id')
+            c.execute('DELETE FROM waiting_list WHERE id = ?', (item_id,))
+            flash('Item removido da fila de espera.', 'success')
+
+        conn.commit()
+
+    # --- Fetch Data for Admin Page ---
+    # Stats
+    c.execute('SELECT COUNT(*) FROM users')
+    users_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM reservations WHERE status = "pending"')
+    pending_reservations_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM reservations')
+    total_reservations_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM waiting_list')
+    waiting_list_count = c.fetchone()[0]
+    stats = {
+        'users': users_count,
+        'pending_reservations': pending_reservations_count,
+        'total_reservations': total_reservations_count,
+        'waiting_list_count': waiting_list_count
+    }
+
+    # Users (with filters)
+    user_email_filter = request.args.get('user_email_filter', '').lower()
+    user_role_filter = request.args.get('user_role_filter', '')
+    user_query = 'SELECT id, name, email, phone, role, data_cadastro FROM users WHERE 1=1'
+    user_params = []
+    if user_email_filter:
+        user_query += ' AND email LIKE ?'
+        user_params.append(f'%{user_email_filter}%')
+    if user_role_filter:
+        user_query += ' AND role = ?'
+        user_params.append(user_role_filter)
+    users = c.execute(user_query, user_params).fetchall()
+    users_list = []
+    for u in users:
+        users_list.append({
+            'id': u[0], 'name': u[1], 'email': u[2], 'phone': u[3], 'role': u[4], 'data_cadastro': u[5]
+        })
+
+    # Reservations (with filters)
+    res_search_filter = request.args.get('res_search_filter', '').lower()
+    res_status_filter = request.args.get('res_status_filter', '')
+    res_query = '''
+        SELECT r.id, u.email, r.service, r.quantity, r.status, r.denied_reason, r.created_at 
+        FROM reservations r JOIN users u ON r.user_id = u.id WHERE 1=1
+    '''
+    res_params = []
+    if res_search_filter:
+        res_query += ' AND (r.service LIKE ? OR u.email LIKE ?)'
+        res_params.extend([f'%{res_search_filter}%', f'%{res_search_filter}%'])
+    if res_status_filter:
+        res_query += ' AND r.status = ?'
+        res_params.append(res_status_filter)
+    res_query += ' ORDER BY r.created_at DESC'
+    reservations = c.execute(res_query, res_params).fetchall()
+    reservations_list = []
+    for r in reservations:
+        reservations_list.append({
+            'id': r[0], 'user_email': r[1], 'service': r[2], 'quantity': r[3], 
+            'status': r[4], 'denied_reason': r[5], 'created_at': r[6]
+        })
+
+    # Waiting List
+    c.execute('''SELECT wl.id, u.email, wl.service, wl.created_at 
+                 FROM waiting_list wl JOIN users u ON wl.user_id = u.id ORDER BY wl.created_at ASC''')
+    waiting_list_items = []
+    for item in c.fetchall():
+        waiting_list_items.append({
+            'id': item[0], 'user_email': item[1], 'service': item[2], 'created_at': item[3]
+        })
+
+    # Data for 'Insert New Reservation' form
+    all_users = c.execute('SELECT id, email FROM users ORDER BY email').fetchall()
+    all_services_raw = c.execute('SELECT service FROM stock ORDER BY service').fetchall()
+    all_services = [s[0] for s in all_services_raw] # List of service names
+
+    conn.close()
+    
+    return render_template_string(ADMIN_HTML, 
+                                  stats=stats, 
+                                  users=users_list, 
+                                  reservations=reservations_list, 
+                                  waiting_list=waiting_list_items,
+                                  all_users=all_users, 
+                                  all_services=all_services,
+                                  request=request) # Pass request to access args in template
 
 @app.route('/backup_db')
 def backup_db():
     if session.get('role') != 'admin':
-        abort(403) # Forbidden
+        abort(403)
     
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
 
-    # Fetch all data from tables
+    # Fetch all data
     users = c.execute('SELECT id, name, email, phone, role, data_cadastro FROM users').fetchall()
     reservations = c.execute('SELECT id, user_id, service, quantity, status, approved_by, denied_reason, created_at FROM reservations').fetchall()
     stock = c.execute('SELECT id, service, quantity, last_sync FROM stock').fetchall()
@@ -1481,72 +1424,72 @@ def backup_db():
 
     backup_data = {
         'timestamp': datetime.now().isoformat(),
-        'users': [dict(zip(['id', 'name', 'email', 'phone', 'role', 'data_cadastro'], row)) for row in users],
-        'reservations': [dict(zip(['id', 'user_id', 'service', 'quantity', 'status', 'approved_by', 'denied_reason', 'created_at'], row)) for row in reservations],
-        'stock': [dict(zip(['id', 'service', 'quantity', 'last_sync'], row)) for row in stock],
-        'waiting_list': [dict(zip(['id', 'user_id', 'service', 'created_at'], row)) for row in waiting_list]
+        'users': [dict(zip(['id', 'name', 'email', 'phone', 'role', 'data_cadastro'], u)) for u in users],
+        'reservations': [dict(zip(['id', 'user_id', 'service', 'quantity', 'status', 'approved_by', 'denied_reason', 'created_at'], r)) for r in reservations],
+        'stock': [dict(zip(['id', 'service', 'quantity', 'last_sync'], s)) for s in stock],
+        'waiting_list': [dict(zip(['id', 'user_id', 'service', 'created_at'], wl)) for wl in waiting_list]
     }
-    
+
     json_data = json.dumps(backup_data, indent=4, ensure_ascii=False)
     
     buffer = io.BytesIO()
     buffer.write(json_data.encode('utf-8'))
     buffer.seek(0)
     
-    filename = f"jgminis_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    filename = f"jgminis_backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+    logging.info(f'Backup DB gerado: {filename}')
     return send_file(buffer, as_attachment=True, download_name=filename, mimetype='application/json')
 
 @app.route('/export_csv')
 def export_csv():
     if session.get('role') != 'admin':
-        abort(403) # Forbidden
+        abort(403)
     
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
     
-    # Fetch reservations with user info
-    c.execute('''
+    # Join reservations with user details
+    rows = c.execute('''
         SELECT r.id, u.name, u.email, u.phone, r.service, r.quantity, r.status, r.denied_reason, r.created_at 
         FROM reservations r JOIN users u ON r.user_id = u.id ORDER BY r.created_at DESC
-    ''')
-    rows = c.fetchall()
+    ''').fetchall()
+    
     conn.close()
 
     output = io.StringIO()
     writer = csv.writer(output)
     
-    # Write header
-    writer.writerow(['ID Reserva', 'Nome Usuário', 'Email Usuário', 'Telefone Usuário', 'Miniatura', 'Quantidade', 'Status', 'Motivo Negação', 'Data Criação'])
-    
-    # Write data rows
+    writer.writerow(['ID Reserva', 'Nome Usuário', 'Email Usuário', 'Telefone Usuário', 'Serviço', 'Quantidade', 'Status', 'Motivo Rejeição', 'Data Reserva'])
     writer.writerows(rows)
     
     buffer = io.BytesIO()
     buffer.write(output.getvalue().encode('utf-8'))
     buffer.seek(0)
     
-    filename = f"jgminis_reservas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    filename = f"jgminis_reservas_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+    logging.info(f'Export CSV gerado: {filename}')
     return send_file(buffer, as_attachment=True, download_name=filename, mimetype='text/csv')
 
 @app.route('/favicon.ico')
 def favicon():
-    # Return a 204 No Content response for favicon requests
-    return '', 204
+    return '', 204 # No favicon
 
-# --- 10. Error Handlers ---
+@app.errorhandler(403)
+def forbidden_error(e):
+    flash('Você não tem permissão para acessar esta página.', 'error')
+    return redirect(url_for('index')), 403
+
 @app.errorhandler(404)
 def page_not_found(e):
     flash('A página que você tentou acessar não foi encontrada.', 'error')
     return redirect(url_for('index')), 404
 
 @app.errorhandler(500)
-def internal_server_error(e):
-    logging.error(f'Erro interno do servidor: {e}')
+def internal_error(e):
+    logging.error(f'Erro interno do servidor: {e}', exc_info=True)
     flash('Ocorreu um erro inesperado no servidor. Por favor, tente novamente mais tarde.', 'error')
     return redirect(url_for('index')), 500
 
-# --- 11. Run Application ---
+# --- 10. Run the Flask App ---
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    host = '0.0.0.0'
-    app.run(host=host, port=port, debug=False) # Set debug=True for development
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
