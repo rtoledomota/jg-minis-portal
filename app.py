@@ -1,16 +1,3 @@
-# app.py - JG MINIS v4.2 - Código Completo e Definitivo
-
-Este documento contém o código-fonte Python completo para a aplicação JG MINIS v4.2. Ele incorpora todas as funcionalidades e ajustes solicitados, garantindo que o aplicativo esteja pronto para produção.
-
-**Instruções de Uso:**
-
-1.  **Copie o Código**: Selecione todo o conteúdo do bloco de código abaixo (do `import os` até o final) e copie-o.
-2.  **GitHub**: Acesse seu repositório no GitHub (`rtoledomota/jg-minis-portal`), abra o arquivo `app.py` para edição, apague todo o conteúdo existente e cole este código. Faça um commit.
-3.  **Railway Variables**: Confirme ou adicione as variáveis de ambiente necessárias no Railway: `LOGO_URL`, `WHATSAPP_NUMBER`, `GOOGLE_SHEETS_CREDENTIALS`, `SECRET_KEY`, `DATABASE`.
-4.  **Redeploy**: No Railway, acione um redeploy para que as alterações entrem em vigor.
-5.  **Teste Completo**: Verifique todas as funcionalidades no seu aplicativo.
-
-```python
 import os
 import json
 import sqlite3
