@@ -24,11 +24,11 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.13') # Chave secreta para sessões
 
 # Define o caminho do banco de dados, usando variável de ambiente ou padrão
-DATABASE_PATH = os.environ.get('DATABASE_PATH', 'jgminis.db') # Padrão para jgminis.db se não definida
+DATABASE_PATH = os.environ.get('DATABASE_PATH', 'jgminis.db')
 
 # --- Funções de Banco de Dados ---
 def init_db():
-    """Inicializa o banco de dados SQLite, criando tabelas se não existirem e um admin padrão se o DB estiver vazio."""
+    """Inicializa o banco de dados SQLite, criando tabelas se não existirem."""
     conn = None
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -85,16 +85,14 @@ def init_db():
         usuarios_count = c.fetchone()[0]
         if usuarios_count == 0:
             logging.warning('DB inicializado: 0 usuários encontrados. Criando usuário admin padrão.')
-            # Cria usuário admin padrão se não houver nenhum
-            admin_email = "admin@jgminis.com.br"
-            admin_senha_hash = hashlib.sha256("admin123".encode()).hexdigest()
-            try:
-                c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
-                          ('Admin Padrão', admin_email, admin_senha_hash, True))
-                conn.commit()
-                logging.info(f'DB inicializado: Usuário admin padrão criado ({admin_email}).')
-            except sqlite3.IntegrityError:
-                logging.warning(f'DB inicializado: Usuário admin padrão ({admin_email}) já existe.')
+            # Cria usuário admin padrão se o DB estiver vazio
+            admin_email = 'admin@jgminis.com.br'
+            admin_senha_hash = hashlib.sha256('admin123'.encode()).hexdigest()
+            c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
+                      ('Administrador', admin_email, admin_senha_hash, True))
+            conn.commit()
+            logging.info(f'Usuário admin padrão criado: {admin_email} (senha: admin123)')
+            usuarios_count = 1 # Atualiza a contagem para o log
         else:
             logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
 
@@ -388,13 +386,13 @@ def registro():
         
         # Validação de CPF (apenas dígitos, 11 ou 14 caracteres para CPF/CNPJ)
         cleaned_cpf = ''.join(filter(str.isdigit, cpf))
-        if not (cleaned_cpf.isdigit() and 10 <= len(cleaned_cpf) <= 11): # Corrigido <=
+        if not (cleaned_cpf.isdigit() and 10 &lt;= len(cleaned_cpf) &lt;= 11): # Corrigido &lt;=
             flash('CPF inválido. Deve conter 11 dígitos.', 'error')
             return render_template('registro.html')
 
         # Validação de Telefone (apenas dígitos, 10 ou 11 caracteres)
         cleaned_telefone = ''.join(filter(str.isdigit, telefone))
-        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11): # Corrigido <=
+        if not (cleaned_telefone.isdigit() and 10 &lt;= len(cleaned_telefone) &lt;= 11): # Corrigido &lt;=
             flash('Telefone inválido. Deve conter 10 ou 11 dígitos.', 'error')
             return render_template('registro.html')
 
@@ -483,10 +481,10 @@ def reservar(car_id):
             hora_fim = datetime.strptime(hora_fim_str, '%H:%M').time()
 
             # Validação de data e hora
-            if data_reserva < datetime.now().date():
+            if data_reserva &lt; datetime.now().date():
                 flash('Não é possível reservar para uma data passada.', 'error')
                 return render_template('reservar.html', car=car)
-            if data_reserva == datetime.now().date() and hora_inicio < datetime.now().time():
+            if data_reserva == datetime.now().date() and hora_inicio &lt; datetime.now().time():
                 flash('Não é possível reservar para um horário passado no dia de hoje.', 'error')
                 return render_template('reservar.html', car=car)
             if hora_inicio >= hora_fim:
@@ -494,21 +492,6 @@ def reservar(car_id):
                 return render_template('reservar.html', car=car)
 
             conn = get_db_connection()
-            # Verifica disponibilidade do carro para o período
-            conflito = conn.execute('''SELECT id FROM reservas
-                                       WHERE carro_id = ? AND data_reserva = ?
-                                       AND (
-                                           (hora_inicio < ? AND hora_fim > ?) OR
-                                           (hora_inicio < ? AND hora_fim > ?) OR
-                                           (hora_inicio >= ? AND hora_fim <= ?)
-                                       ) AND status != 'cancelada' ''',
-                                    (car_id, data_reserva, hora_fim, hora_inicio, hora_inicio, hora_fim, hora_inicio, hora_fim)).fetchone()
-            
-            if conflito:
-                flash('Carro já reservado para este período.', 'error')
-                conn.close()
-                return render_template('reservar.html', car=car)
-
             conn.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, observacoes) VALUES (?, ?, ?, ?, ?, ?)',
                          (session['user_id'], car_id, data_reserva, hora_inicio, hora_fim, observacoes))
             conn.execute('UPDATE carros SET disponivel = FALSE WHERE id = ?', (car_id,))
@@ -842,10 +825,9 @@ def admin_restore_backup():
                 # Verifica integridade do hash
                 received_hash = backup_data.pop('hash', None)
                 if received_hash:
-                    # Recalcula o hash do conteúdo restante (sem o hash original)
                     calculated_hash = hashlib.sha256(json.dumps(backup_data, indent=4, ensure_ascii=False).encode()).hexdigest()
                     if received_hash != calculated_hash:
-                        flash('Erro de integridade do backup: hash não corresponde. O arquivo pode estar corrompido ou modificado.', 'error')
+                        flash('Erro de integridade do backup: hash não corresponde.', 'error')
                         logging.error('Erro de integridade do backup: hash não corresponde.')
                         return redirect(url_for('admin_panel'))
                 else:
@@ -880,9 +862,9 @@ def admin_restore_backup():
                 logging.info(f"DB restaurado: {len(backup_data.get('reservas', []))} reservas, {len(backup_data.get('usuarios', []))} usuários, {len(backup_data.get('carros', []))} carros.")
                 
                 # Sincroniza com Sheets após restauração
-                sync_reservas_to_sheets()
                 sync_usuarios_to_sheets()
                 sync_carros_to_sheets()
+                sync_reservas_to_sheets()
 
             except json.JSONDecodeError:
                 flash('Arquivo de backup inválido: não é um JSON válido.', 'error')
@@ -895,7 +877,7 @@ def admin_restore_backup():
                 logging.error(f'Erro inesperado ao restaurar backup: {e}')
         else:
             flash('Por favor, selecione um arquivo JSON válido.', 'error')
-    return render_template('admin_restore_backup.html') # Você precisaria criar este template
+    return redirect(url_for('admin_panel'))
 
 # --- Tratamento de Erros ---
 @app.errorhandler(500)
