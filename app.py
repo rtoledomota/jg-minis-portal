@@ -1,48 +1,61 @@
 import os
-from flask import Flask, request, render_template_string, session, redirect, url_for, jsonify
+import json
+from flask import Flask, request, render_template_string, session, redirect, url_for, jsonify, flash
 import gspread
 from google.oauth2.service_account import Credentials
 import hashlib
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
+import logging
+
+# Configuração de logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', 'default_secret_key_for_dev_only')
+app.secret_key = os.getenv('SECRET_KEY', 'uma_chave_secreta_padrao_e_segura') # Use uma chave forte em produção
 
-# --- Configuração Google Sheets ---
-# As credenciais são carregadas de variáveis de ambiente do Railway
-creds_dict = {
-    "type": "service_account",
-    "project_id": os.getenv('GOOGLE_PROJECT_ID'),
-    "private_key_id": os.getenv('GOOGLE_PRIVATE_KEY_ID'),
-    "private_key": os.getenv('GOOGLE_PRIVATE_KEY', '').replace('\\\n', '\n'), # Substitui \\n por \n
-    "client_email": os.getenv('GOOGLE_CLIENT_EMAIL'),
-    "client_id": os.getenv('GOOGLE_CLIENT_ID'),
-    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_x509_cert_url": os.getenv('GOOGLE_CLIENT_X509_CERT_URL')
-}
+# --- Configuração do Google Sheets ---
+try:
+    creds_dict = {
+        "type": "service_account",
+        "project_id": os.getenv('GOOGLE_PROJECT_ID'),
+        "private_key_id": os.getenv('GOOGLE_PRIVATE_KEY_ID'),
+        "private_key": os.getenv('GOOGLE_PRIVATE_KEY').replace('\\\n', '\n'), # Substitui \\n por \n
+        "client_email": os.getenv('GOOGLE_CLIENT_EMAIL'),
+        "client_id": os.getenv('GOOGLE_CLIENT_ID'),
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_x509_cert_url": os.getenv('GOOGLE_CLIENT_X509_CERT_URL')
+    }
+    
+    # Verifica se todas as chaves essenciais estão presentes e não são None
+    if not all(creds_dict.get(k) for k in ["project_id", "private_key", "client_email"]):
+        raise ValueError("Credenciais do Google incompletas nas variáveis de ambiente.")
 
-gc = None
-sheet_id = os.getenv('SHEET_ID')
-if sheet_id and all(creds_dict.values()): # Verifica se todas as credenciais e SHEET_ID estão configurados
-    try:
-        creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/spreadsheets'])
-        gc = gspread.authorize(creds)
-        print("gspread: Autenticação bem-sucedida.")
-    except Exception as e:
-        print(f"gspread: Erro na autenticação ou carregamento de credenciais: {e}")
-        gc = None
-else:
-    print("gspread: Variáveis de ambiente para Google Sheets incompletas. Sincronização com Sheets desativada.")
+    creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/spreadsheets'])
+    gc = gspread.authorize(creds)
+    logging.info("gspread: google-auth e gspread importados e autenticados com sucesso.")
+    
+    SHEET_ID = os.getenv('SHEET_ID')
+    if not SHEET_ID:
+        raise ValueError("GOOGLE_SHEET_ID não configurado nas variáveis de ambiente.")
+    
+    sheet = gc.open_by_key(SHEET_ID)
+    logging.info(f"Planilha Google Sheets '{SHEET_ID}' aberta com sucesso.")
+
+except Exception as e:
+    logging.error(f"Erro na configuração do Google Sheets: {e}. Sincronização com Sheets desativada.")
+    gc = None
+    sheet = None
+    SHEET_ID = None
 
 # --- Configuração do Banco de Dados SQLite ---
 DATABASE_PATH = os.getenv('DATABASE_PATH', 'jgminis.db')
 
 def get_db_connection():
     conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row # Permite acessar colunas por nome
+    conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
@@ -59,11 +72,11 @@ def init_db():
             cpf TEXT,
             telefone TEXT,
             data_cadastro TEXT,
-            admin BOOLEAN DEFAULT 0
+            is_admin INTEGER DEFAULT 0
         )
     ''')
 
-    # Tabela de Carros
+    # Tabela de Carros (Miniaturas)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS carros (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,7 +93,7 @@ def init_db():
     # Adiciona a coluna thumbnail_url se não existir (para compatibilidade)
     try:
         cursor.execute("ALTER TABLE carros ADD COLUMN thumbnail_url TEXT")
-        print("DB: Coluna 'thumbnail_url' adicionada à tabela 'carros'.")
+        logging.info("Coluna 'thumbnail_url' adicionada à tabela 'carros'.")
     except sqlite3.OperationalError:
         pass # Coluna já existe
 
@@ -101,1033 +114,724 @@ def init_db():
     ''')
 
     # Cria usuário admin padrão se não existir
-    admin_email = "admin@jgminis.com.br"
-    admin_senha_hash = hashlib.sha256("admin123".encode()).hexdigest() # SHA256 de 'admin123'
-    cursor.execute("SELECT * FROM usuarios WHERE email = ?", (admin_email,))
-    if not cursor.fetchone():
-        cursor.execute("INSERT INTO usuarios (nome, email, senha_hash, admin) VALUES (?, ?, ?, ?)",
-                       ('Administrador', admin_email, admin_senha_hash, True))
-        print(f"DB: Usuário admin '{admin_email}' criado.")
+    admin_email = 'admin@jgminis.com.br'
+    admin_senha_hash = hashlib.sha256('admin123'.encode()).hexdigest() # SHA256 de 'admin123'
+    cursor.execute("SELECT id FROM usuarios WHERE email = ?", (admin_email,))
+    if cursor.fetchone() is None:
+        cursor.execute("INSERT INTO usuarios (nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       ('Admin', admin_email, admin_senha_hash, '111.111.111-11', '(11)99999-9999', datetime.now().strftime('%Y-%m-%d'), 1))
+        logging.info(f"Usuário admin '{admin_email}' criado no DB local.")
     else:
-        print(f"DB: Usuário admin '{admin_email}' já existe.")
+        logging.info(f"Usuário admin '{admin_email}' já existe no DB local.")
+
+    conn.commit()
+    conn.close()
+    logging.info("DB inicializado com sucesso.")
+
+# --- Funções de Sincronização com Google Sheets ---
+def get_sheet_data(sheet_name, default_headers):
+    if not sheet:
+        return []
+    try:
+        worksheet = sheet.worksheet(sheet_name)
+        data = worksheet.get_all_records()
+        logging.info(f"Dados da aba '{sheet_name}' carregados do Sheets: {len(data)} registros.")
+        return data
+    except gspread.WorksheetNotFound:
+        logging.warning(f"Aba '{sheet_name}' não encontrada. Criando aba...")
+        worksheet = sheet.add_worksheet(sheet_name, rows=1000, cols=len(default_headers))
+        worksheet.append_row(default_headers)
+        logging.info(f"Aba '{sheet_name}' criada com cabeçalhos padrão.")
+        return []
+    except Exception as e:
+        logging.error(f"Erro ao carregar dados da aba '{sheet_name}' do Sheets: {e}")
+        return []
+
+def update_sheet_data(sheet_name, headers, data):
+    if not sheet:
+        return
+    try:
+        worksheet = sheet.worksheet(sheet_name)
+        worksheet.clear()
+        worksheet.append_row(headers)
+        for row_data in data:
+            row_values = [row_data.get(h, '') for h in headers]
+            worksheet.append_row(row_values)
+        logging.info(f"Dados da aba '{sheet_name}' atualizados no Sheets: {len(data)} registros.")
+    except gspread.WorksheetNotFound:
+        logging.error(f"Aba '{sheet_name}' não encontrada para atualização. Criando e populando...")
+        worksheet = sheet.add_worksheet(sheet_name, rows=1000, cols=len(headers))
+        worksheet.append_row(headers)
+        for row_data in data:
+            row_values = [row_data.get(h, '') for h in headers]
+            worksheet.append_row(row_values)
+    except Exception as e:
+        logging.error(f"Erro ao atualizar dados da aba '{sheet_name}' no Sheets: {e}")
+
+def load_from_sheets_to_db():
+    if not sheet:
+        logging.warning("Cliente gspread não inicializado. Carregando dados apenas do DB local.")
+        return
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Carregar Carros
+    carros_headers = ['ID', 'IMAGEM', 'NOME DA MINIATURA', 'MARCA/FABRICANTE', 'PREVISÃO DE CHEGADA', 'QUANTIDADE DISPONIVEL', 'VALOR', 'OBSERVAÇÕES', 'MAX_RESERVAS_POR_USUARIO']
+    sheet_carros = get_sheet_data('Carros', carros_headers)
+    if sheet_carros:
+        cursor.execute("DELETE FROM carros") # Limpa DB para recarregar do Sheets
+        for row in sheet_carros:
+            try:
+                carro_id = row.get('ID')
+                if carro_id is None or carro_id == '': # Gera ID se não existir na planilha
+                    carro_id = cursor.execute("SELECT MAX(id) FROM carros").fetchone()[0]
+                    carro_id = (carro_id if carro_id is not None else 0) + 1
+                
+                cursor.execute(
+                    "INSERT INTO carros (id, thumbnail_url, modelo, marca, ano, quantidade_disponivel, preco_diaria, observacoes, max_reservas) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        carro_id,
+                        row.get('IMAGEM', ''),
+                        row.get('NOME DA MINIATURA', ''),
+                        row.get('MARCA/FABRICANTE', ''),
+                        row.get('PREVISÃO DE CHEGADA', ''),
+                        int(row.get('QUANTIDADE DISPONIVEL', 0)),
+                        float(row.get('VALOR', 0.0)),
+                        row.get('OBSERVAÇÕES', ''),
+                        int(row.get('MAX_RESERVAS_POR_USUARIO', 1))
+                    )
+                )
+            except Exception as e:
+                logging.error(f"Erro ao inserir carro do Sheets no DB: {e} - Dados: {row}")
+        logging.info(f"Carros carregados do Sheets para o DB: {len(sheet_carros)} itens.")
+    else:
+        logging.warning("Nenhum carro encontrado na planilha ou erro ao carregar.")
+
+    # Carregar Usuários
+    usuarios_headers = ['ID', 'Nome', 'Email', 'Senha_hash', 'CPF', 'Telefone', 'Data_Cadastro', 'Is_Admin']
+    sheet_usuarios = get_sheet_data('Usuarios', usuarios_headers)
+    if sheet_usuarios:
+        cursor.execute("DELETE FROM usuarios WHERE is_admin = 0") # Mantém admin padrão se não estiver no Sheets
+        for row in sheet_usuarios:
+            try:
+                usuario_id = row.get('ID')
+                if usuario_id is None or usuario_id == '':
+                    usuario_id = cursor.execute("SELECT MAX(id) FROM usuarios").fetchone()[0]
+                    usuario_id = (usuario_id if usuario_id is not None else 0) + 1
+                
+                # Verifica se o usuário já existe (para não duplicar o admin padrão)
+                cursor.execute("SELECT id FROM usuarios WHERE email = ?", (row.get('Email', ''),))
+                if cursor.fetchone() is None:
+                    cursor.execute(
+                        "INSERT INTO usuarios (id, nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            usuario_id,
+                            row.get('Nome', ''),
+                            row.get('Email', ''),
+                            row.get('Senha_hash', ''),
+                            row.get('CPF', ''),
+                            row.get('Telefone', ''),
+                            row.get('Data_Cadastro', ''),
+                            1 if row.get('Is_Admin', '').lower() == 'sim' else 0
+                        )
+                    )
+            except Exception as e:
+                logging.error(f"Erro ao inserir usuário do Sheets no DB: {e} - Dados: {row}")
+        logging.info(f"Usuários carregados do Sheets para o DB: {len(sheet_usuarios)} itens.")
+    else:
+        logging.warning("Nenhum usuário encontrado na planilha ou erro ao carregar.")
+
+    # Carregar Reservas
+    reservas_headers = ['ID', 'Usuario_id', 'Carro_id', 'Data_reserva', 'Hora_inicio', 'Hora_fim', 'Status', 'Observacoes']
+    sheet_reservas = get_sheet_data('Reservas', reservas_headers)
+    if sheet_reservas:
+        cursor.execute("DELETE FROM reservas")
+        for row in sheet_reservas:
+            try:
+                reserva_id = row.get('ID')
+                if reserva_id is None or reserva_id == '':
+                    reserva_id = cursor.execute("SELECT MAX(id) FROM reservas").fetchone()[0]
+                    reserva_id = (reserva_id if reserva_id is not None else 0) + 1
+                
+                cursor.execute(
+                    "INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        reserva_id,
+                        int(row.get('Usuario_id', 0)),
+                        int(row.get('Carro_id', 0)),
+                        row.get('Data_reserva', ''),
+                        row.get('Hora_inicio', ''),
+                        row.get('Hora_fim', ''),
+                        row.get('Status', ''),
+                        row.get('Observacoes', '')
+                    )
+                )
+            except Exception as e:
+                logging.error(f"Erro ao inserir reserva do Sheets no DB: {e} - Dados: {row}")
+        logging.info(f"Reservas carregadas do Sheets para o DB: {len(sheet_reservas)} itens.")
+    else:
+        logging.warning("Nenhuma reserva encontrada na planilha ou erro ao carregar.")
 
     conn.commit()
     conn.close()
 
-# --- Funções de Sincronização com Sheets ---
-def load_from_sheets():
-    if not gc or not sheet_id:
-        print("load_from_sheets: Cliente gspread não inicializado ou SHEET_ID ausente. Carregando dados apenas do DB local.")
+def sync_db_to_sheets():
+    if not sheet:
+        logging.warning("Cliente gspread não inicializado. Sincronização do DB para Sheets desativada.")
         return
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    try:
-        gsheet = gc.open_by_key(sheet_id)
+    # Sincronizar Carros
+    carros_headers = ['ID', 'IMAGEM', 'NOME DA MINIATURA', 'MARCA/FABRICANTE', 'PREVISÃO DE CHEGADA', 'QUANTIDADE DISPONIVEL', 'VALOR', 'OBSERVAÇÕES', 'MAX_RESERVAS_POR_USUARIO']
+    db_carros = cursor.execute("SELECT id, thumbnail_url, modelo, marca, ano, quantidade_disponivel, preco_diaria, observacoes, max_reservas FROM carros").fetchall()
+    carros_data = [{
+        'ID': c['id'],
+        'IMAGEM': c['thumbnail_url'],
+        'NOME DA MINIATURA': c['modelo'],
+        'MARCA/FABRICANTE': c['marca'],
+        'PREVISÃO DE CHEGADA': c['ano'],
+        'QUANTIDADE DISPONIVEL': c['quantidade_disponivel'],
+        'VALOR': c['preco_diaria'],
+        'OBSERVAÇÕES': c['observacoes'],
+        'MAX_RESERVAS_POR_USUARIO': c['max_reservas']
+    } for c in db_carros]
+    update_sheet_data('Carros', carros_headers, carros_data)
 
-        # --- Carregar Carros ---
-        try:
-            carros_sheet = gsheet.worksheet('Carros')
-            data_carros = carros_sheet.get_all_records()
-            cursor.execute("DELETE FROM carros") # Limpa DB para recarregar do Sheets
-            for i, row in enumerate(data_carros):
-                # Mapeamento das colunas da planilha do usuário
-                carro_id = row.get('ID') if row.get('ID') else (i + 1) # Usa ID da planilha ou gera
-                thumbnail_url = row.get('IMAGEM', '')
-                modelo = row.get('NOME DA MINIATURA', '')
-                marca = row.get('MARCA/FABRICANTE', '')
-                ano = row.get('PREVISÃO DE CHEGADA', '')
-                quantidade_disponivel = int(row.get('QUANTIDADE DISPONIVEL', 0))
-                preco_diaria = float(row.get('VALOR', 0))
-                observacoes = row.get('OBSERVAÇÕES', '') + (f" (Previsão: {ano})" if ano else "")
-                max_reservas = int(row.get('MAX_RESERVAS_POR_USUARIO', 1))
+    # Sincronizar Usuários
+    usuarios_headers = ['ID', 'Nome', 'Email', 'Senha_hash', 'CPF', 'Telefone', 'Data_Cadastro', 'Is_Admin']
+    db_usuarios = cursor.execute("SELECT id, nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin FROM usuarios").fetchall()
+    usuarios_data = [{
+        'ID': u['id'],
+        'Nome': u['nome'],
+        'Email': u['email'],
+        'Senha_hash': u['senha_hash'],
+        'CPF': u['cpf'],
+        'Telefone': u['telefone'],
+        'Data_Cadastro': u['data_cadastro'],
+        'Is_Admin': 'Sim' if u['is_admin'] == 1 else 'Não'
+    } for u in db_usuarios]
+    update_sheet_data('Usuarios', usuarios_headers, usuarios_data)
 
-                cursor.execute("INSERT INTO carros (id, thumbnail_url, modelo, marca, ano, quantidade_disponivel, preco_diaria, observacoes, max_reservas) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                               (carro_id, thumbnail_url, modelo, marca, ano, quantidade_disponivel, preco_diaria, observacoes, max_reservas))
-            print(f"load_from_sheets: {len(data_carros)} carros carregados da planilha 'Carros'.")
-        except gspread.WorksheetNotFound:
-            print("load_from_sheets: Aba 'Carros' não encontrada na planilha. Criando aba e populando DB com dados padrão.")
-            carros_sheet = gsheet.add_worksheet('Carros', 1000, 9)
-            carros_sheet.append_row(['ID', 'IMAGEM', 'NOME DA MINIATURA', 'MARCA/FABRICANTE', 'PREVISÃO DE CHEGADA', 'QUANTIDADE DISPONIVEL', 'VALOR', 'OBSERVAÇÕES', 'MAX_RESERVAS_POR_USUARIO'])
-            # O DB de carros ficará vazio até que dados sejam adicionados via admin ou planilha
-        except Exception as e:
-            print(f"load_from_sheets: Erro ao carregar carros do Sheets: {e}")
+    # Sincronizar Reservas
+    reservas_headers = ['ID', 'Usuario_id', 'Carro_id', 'Data_reserva', 'Hora_inicio', 'Hora_fim', 'Status', 'Observacoes']
+    db_reservas = cursor.execute("SELECT id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes FROM reservas").fetchall()
+    reservas_data = [{
+        'ID': r['id'],
+        'Usuario_id': r['usuario_id'],
+        'Carro_id': r['carro_id'],
+        'Data_reserva': r['data_reserva'],
+        'Hora_inicio': r['hora_inicio'],
+        'Hora_fim': r['hora_fim'],
+        'Status': r['status'],
+        'Observacoes': r['observacoes']
+    } for r in db_reservas]
+    update_sheet_data('Reservas', reservas_headers, reservas_data)
 
-        # --- Carregar Usuários ---
-        try:
-            usuarios_sheet = gsheet.worksheet('Usuarios')
-            data_usuarios = usuarios_sheet.get_all_records()
-            # Não limpa usuários do DB para preservar o admin padrão se não estiver na planilha
-            for i, row in enumerate(data_usuarios):
-                usuario_id = row.get('ID') if row.get('ID') else (i + 1)
-                email = row.get('Email', '')
-                if email and not cursor.execute("SELECT id FROM usuarios WHERE email = ?", (email,)).fetchone():
-                    cursor.execute("INSERT INTO usuarios (id, nome, email, senha_hash, cpf, telefone, data_cadastro, admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                                   (usuario_id, row.get('Nome', ''), email, row.get('Senha_hash', ''), row.get('CPF', ''), row.get('Telefone', ''), row.get('Data Cadastro', ''), row.get('Admin', 'Não').lower() == 'sim'))
-            print(f"load_from_sheets: {len(data_usuarios)} usuários carregados da planilha 'Usuarios'.")
-        except gspread.WorksheetNotFound:
-            print("load_from_sheets: Aba 'Usuarios' não encontrada na planilha. Usuários não carregados do Sheets.")
-            # A aba será criada automaticamente se dados forem adicionados via admin e sync_to_sheets for chamado
-        except Exception as e:
-            print(f"load_from_sheets: Erro ao carregar usuários do Sheets: {e}")
+    conn.close()
 
-        # --- Carregar Reservas ---
-        try:
-            reservas_sheet = gsheet.worksheet('Reservas')
-            data_reservas = reservas_sheet.get_all_records()
-            cursor.execute("DELETE FROM reservas") # Limpa DB para recarregar do Sheets
-            for i, row in enumerate(data_reservas):
-                reserva_id = row.get('ID') if row.get('ID') else (i + 1)
-                usuario_id = int(row.get('Usuario_id', 0))
-                carro_id = int(row.get('Carro_id', 0))
-                data_reserva = row.get('Data_reserva', '')
-                hora_inicio = row.get('Hora_inicio', '')
-                hora_fim = row.get('Hora_fim', '')
-                status = row.get('Status', 'pendente')
-                observacoes = row.get('Observacoes', '')
-
-                cursor.execute("INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                               (reserva_id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes))
-            print(f"load_from_sheets: {len(data_reservas)} reservas carregadas da planilha 'Reservas'.")
-        except gspread.WorksheetNotFound:
-            print("load_from_sheets: Aba 'Reservas' não encontrada na planilha. Reservas não carregadas do Sheets.")
-        except Exception as e:
-            print(f"load_from_sheets: Erro ao carregar reservas do Sheets: {e}")
-
-    except Exception as e:
-        print(f"load_from_sheets: Erro geral ao acessar planilha: {e}")
-    finally:
-        conn.commit()
-        conn.close()
-
-def sync_to_sheets():
-    if not gc or not sheet_id:
-        print("sync_to_sheets: Cliente gspread não inicializado ou SHEET_ID ausente. Sincronização para Sheets desativada.")
-        return
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    try:
-        gsheet = gc.open_by_key(sheet_id)
-
-        # --- Sincronizar Carros ---
-        carros_db = cursor.execute("SELECT * FROM carros").fetchall()
-        try:
-            carros_sheet = gsheet.worksheet('Carros')
-        except gspread.WorksheetNotFound:
-            carros_sheet = gsheet.add_worksheet('Carros', 1000, 9)
-        carros_sheet.clear()
-        carros_sheet.append_row(['ID', 'IMAGEM', 'NOME DA MINIATURA', 'MARCA/FABRICANTE', 'PREVISÃO DE CHEGADA', 'QUANTIDADE DISPONIVEL', 'VALOR', 'OBSERVAÇÕES', 'MAX_RESERVAS_POR_USUARIO'])
-        for carro in carros_db:
-            carros_sheet.append_row([
-                carro['id'], carro['thumbnail_url'], carro['modelo'], carro['marca'], carro['ano'],
-                carro['quantidade_disponivel'], carro['preco_diaria'], carro['observacoes'], carro['max_reservas']
-            ])
-        print(f"sync_to_sheets: {len(carros_db)} carros sincronizados para a planilha 'Carros'.")
-
-        # --- Sincronizar Usuários ---
-        usuarios_db = cursor.execute("SELECT * FROM usuarios").fetchall()
-        try:
-            usuarios_sheet = gsheet.worksheet('Usuarios')
-        except gspread.WorksheetNotFound:
-            usuarios_sheet = gsheet.add_worksheet('Usuarios', 100, 8)
-        usuarios_sheet.clear()
-        usuarios_sheet.append_row(['ID', 'Nome', 'Email', 'Senha_hash', 'CPF', 'Telefone', 'Data Cadastro', 'Admin'])
-        for usuario in usuarios_db:
-            usuarios_sheet.append_row([
-                usuario['id'], usuario['nome'], usuario['email'], usuario['senha_hash'],
-                usuario['cpf'], usuario['telefone'], usuario['data_cadastro'], 'Sim' if usuario['admin'] else 'Não'
-            ])
-        print(f"sync_to_sheets: {len(usuarios_db)} usuários sincronizados para a planilha 'Usuarios'.")
-
-        # --- Sincronizar Reservas ---
-        reservas_db = cursor.execute("SELECT * FROM reservas").fetchall()
-        try:
-            reservas_sheet = gsheet.worksheet('Reservas')
-        except gspread.WorksheetNotFound:
-            reservas_sheet = gsheet.add_worksheet('Reservas', 1000, 8)
-        reservas_sheet.clear()
-        reservas_sheet.append_row(['ID', 'Usuario_id', 'Carro_id', 'Data_reserva', 'Hora_inicio', 'Hora_fim', 'Status', 'Observacoes'])
-        for reserva in reservas_db:
-            reservas_sheet.append_row([
-                reserva['id'], reserva['usuario_id'], reserva['carro_id'], reserva['data_reserva'],
-                reserva['hora_inicio'], reserva['hora_fim'], reserva['status'], reserva['observacoes']
-            ])
-        print(f"sync_to_sheets: {len(reservas_db)} reservas sincronizadas para a planilha 'Reservas'.")
-
-    except Exception as e:
-        print(f"sync_to_sheets: Erro geral ao sincronizar para planilha: {e}")
-    finally:
-        conn.close()
-
-# --- Inicialização do DB e Carregamento de Dados ---
+# --- Inicialização do App ---
 with app.app_context():
     init_db()
-    load_from_sheets()
-    print("App bootado com sucesso.")
+    load_from_sheets_to_db() # Carrega dados do Sheets para o DB na inicialização
 
-# --- Rotas da Aplicação ---
+# --- Decoradores ---
+def login_required(f):
+    def wrapper(*args, **kwargs):
+        if not session.get('logged_in'):
+            flash('Você precisa estar logado para acessar esta página.', 'warning')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    wrapper.__name__ = f.__name__ # Necessário para Flask
+    return wrapper
 
-# Rota /health
+def admin_required(f):
+    def wrapper(*args, **kwargs):
+        if not session.get('is_admin'):
+            flash('Acesso negado. Apenas administradores podem acessar esta página.', 'danger')
+            return redirect(url_for('home'))
+        return f(*args, **kwargs)
+    wrapper.__name__ = f.__name__
+    return wrapper
+
+# --- Rotas ---
 @app.route('/health')
 def health():
     return 'OK'
 
-# Rota /login
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        email = request.form.get('email')
-        senha = request.form.get('senha')
+        email = request.form['email']
+        senha = request.form['senha']
         senha_hash = hashlib.sha256(senha.encode()).hexdigest()
 
         conn = get_db_connection()
-        cursor = conn.cursor()
-        user = cursor.execute("SELECT * FROM usuarios WHERE email = ? AND senha_hash = ?", (email, senha_hash)).fetchone()
+        user = conn.execute("SELECT * FROM usuarios WHERE email = ? AND senha_hash = ?", (email, senha_hash)).fetchone()
         conn.close()
 
         if user:
             session['logged_in'] = True
             session['user_id'] = user['id']
-            session['is_admin'] = user['admin']
+            session['user_name'] = user['nome']
+            session['is_admin'] = bool(user['is_admin'])
+            flash(f'Bem-vindo, {user["nome"]}!', 'success')
             return redirect(url_for('home'))
         else:
-            return render_template_string('''
-                <style>
-                    body { font-family: Arial, sans-serif; background-color: #f4f4f4; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-                    .login-container { background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }
-                    .login-container h2 { color: #333; margin-bottom: 20px; }
-                    .login-container input[type="email"], .login-container input[type="password"] { width: calc(100% - 22px); padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; }
-                    .login-container input[type="submit"] { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-                    .login-container input[type="submit"]:hover { background-color: #0056b3; }
-                    .error-message { color: red; margin-top: 10px; }
-                </style>
-                <div class="login-container">
-                    <h2>Login</h2>
-                    <form method="post">
-                        <input type="email" name="email" placeholder="Email" required><br>
-                        <input type="password" name="senha" placeholder="Senha" required><br>
-                        <input type="submit" value="Entrar">
-                    </form>
-                    <p class="error-message">Login falhou. Verifique seu email e senha.</p>
-                </div>
-            ''')
+            flash('Login falhou. Verifique seu email e senha.', 'danger')
+            return render_template_string(LOGIN_HTML, message='Login falhou. Verifique seu email e senha.')
+    return render_template_string(LOGIN_HTML)
 
-    return render_template_string('''
-        <style>
-            body { font-family: Arial, sans-serif; background-color: #f4f4f4; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-            .login-container { background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; }
-            .login-container h2 { color: #333; margin-bottom: 20px; }
-            .login-container input[type="email"], .login-container input[type="password"] { width: calc(100% - 22px); padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; }
-            .login-container input[type="submit"] { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-            .login-container input[type="submit"]:hover { background-color: #0056b3; }
-        </style>
-        <div class="login-container">
-            <h2>Login</h2>
-            <form method="post">
-                <input type="email" name="email" placeholder="Email" required><br>
-                <input type="password" name="senha" placeholder="Senha" required><br>
-                <input type="submit" value="Entrar">
-            </form>
-        </div>
-    ''')
+@app.route('/logout')
+@login_required
+def logout():
+    session.clear()
+    flash('Você foi desconectado.', 'info')
+    return redirect(url_for('login'))
 
-# Rota /home
+@app.route('/')
 @app.route('/home')
+@login_required
 def home():
-    if not session.get('logged_in'):
-        return redirect(url_for('login'))
-
     conn = get_db_connection()
     carros_db = conn.execute("SELECT * FROM carros").fetchall()
     conn.close()
 
-    html_carros = ""
-    if not carros_db:
-        html_carros = "<p>Nenhuma miniatura disponível no momento.</p>"
-    else:
-        for carro in carros_db:
-            html_carros += f'''
-                <div class="card">
-                    <img src="{carro['thumbnail_url']}" alt="{carro['modelo']}">
-                    <h3>{carro['modelo']}</h3>
-                    <p>Marca: {carro['marca']}</p>
-                    <p>Preço Diário: R$ {carro['preco_diaria']:.2f}</p>
-                    <p>Disponível: {carro['quantidade_disponivel']}</p>
-                    <button onclick="reservar({carro['id']})">Reservar</button>
-                </div>
-            '''
-    
-    return render_template_string(f'''
-    <html>
-    <head>
-        <title>JG Minis - Miniaturas</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f8f9fa; }}
-            .navbar {{ background-color: #343a40; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }}
-            .navbar a {{ color: white; text-decoration: none; margin-left: 15px; }}
-            .navbar a:hover {{ text-decoration: underline; }}
-            .container {{ padding: 20px; }}
-            h1 {{ color: #333; text-align: center; margin-bottom: 30px; }}
-            .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; }}
-            .card {{ background-color: white; border: 1px solid #ddd; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-            .card img {{ max-width: 100%; height: 150px; object-fit: cover; border-radius: 4px; margin-bottom: 10px; }}
-            .card h3 {{ margin: 10px 0; color: #007bff; }}
-            .card p {{ margin: 5px 0; color: #555; font-size: 0.9em; }}
-            .card button {{ background: #28a745; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; font-size: 1em; }}
-            .card button:hover {{ background-color: #218838; }}
-        </style>
-    </head>
-    <body>
-        <div class="navbar">
-            <span>Bem-vindo, {session.get('user_id')}!</span>
-            <div>
-                <a href="{url_for('home')}">Home</a>
-                <a href="{url_for('admin')}">Admin</a>
-                <a href="{url_for('logout')}">Sair</a>
-            </div>
-        </div>
-        <div class="container">
-            <h1>JG Minis - Miniaturas Disponíveis</h1>
-            <div class="grid">
-                {html_carros}
-            </div>
-        </div>
-        <script>
-            function reservar(carroId) {{
-                alert('Reserva para carro ' + carroId + ' solicitada. Funcionalidade de reserva completa será implementada.');
-                // Redirecionar para uma rota de reserva mais complexa
-            }}
-        </script>
-    </body>
-    </html>
-    ''')
+    # Converte Row objects para dicionários para facilitar o acesso no HTML
+    carros_list = [dict(carro) for carro in carros_db]
 
-# Rota /admin
+    return render_template_string(HOME_HTML, carros=carros_list, is_admin=session.get('is_admin'))
+
 @app.route('/admin')
+@login_required
+@admin_required
 def admin():
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-
     conn = get_db_connection()
     carros_db = conn.execute("SELECT * FROM carros").fetchall()
     usuarios_db = conn.execute("SELECT * FROM usuarios").fetchall()
     reservas_db = conn.execute("SELECT * FROM reservas").fetchall()
     conn.close()
 
-    html_carros = ""
-    for carro in carros_db:
-        html_carros += f'<tr><td>{carro["id"]}</td><td><img src="{carro["thumbnail_url"]}" width="50"></td><td>{carro["modelo"]}</td><td>{carro["marca"]}</td><td>{carro["preco_diaria"]:.2f}</td><td><a href="/admin/edit_carro/{carro["id"]}">Editar</a> <a href="/admin/delete_carro/{carro["id"]}">Deletar</a></td></tr>'
+    carros_list = [dict(carro) for carro in carros_db]
+    usuarios_list = [dict(usuario) for usuario in usuarios_db]
+    reservas_list = [dict(reserva) for reserva in reservas_db]
 
-    html_usuarios = ""
-    for usuario in usuarios_db:
-        html_usuarios += f'<tr><td>{usuario["id"]}</td><td>{usuario["nome"]}</td><td>{usuario["email"]}</td><td>{"Sim" if usuario["admin"] else "Não"}</td><td><a href="/admin/edit_usuario/{usuario["id"]}">Editar</a> <a href="/admin/delete_usuario/{usuario["id"]}">Deletar</a></td></tr>'
+    return render_template_string(ADMIN_HTML, carros=carros_list, usuarios=usuarios_list, reservas=reservas_list)
 
-    html_reservas = ""
-    for reserva in reservas_db:
-        html_reservas += f'<tr><td>{reserva["id"]}</td><td>{reserva["usuario_id"]}</td><td>{reserva["carro_id"]}</td><td>{reserva["data_reserva"]}</td><td>{reserva["status"]}</td><td><a href="/admin/edit_reserva/{reserva["id"]}">Editar</a> <a href="/admin/delete_reserva/{reserva["id"]}">Deletar</a></td></tr>'
-
-    return render_template_string(f'''
-    <html>
-    <head>
-        <title>Admin Panel</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f8f9fa; }}
-            .navbar {{ background-color: #343a40; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }}
-            .navbar a {{ color: white; text-decoration: none; margin-left: 15px; }}
-            .navbar a:hover {{ text-decoration: underline; }}
-            .container {{ padding: 20px; }}
-            h1, h2 {{ color: #333; margin-bottom: 20px; }}
-            table {{ width: 100%; border-collapse: collapse; margin-bottom: 20px; background-color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-            th {{ background-color: #e9ecef; }}
-            .btn {{ background-color: #007bff; color: white; padding: 8px 12px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; margin-right: 5px; }}
-            .btn-success {{ background-color: #28a745; }}
-            .btn-danger {{ background-color: #dc3545; }}
-            .btn:hover {{ opacity: 0.9; }}
-            .form-group {{ margin-bottom: 15px; }}
-            .form-group label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-            .form-group input[type="text"], .form-group input[type="number"], .form-group input[type="email"], .form-group input[type="password"] {{ width: calc(100% - 22px); padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
-        </style>
-    </head>
-    <body>
-        <div class="navbar">
-            <span>Admin Panel</span>
-            <div>
-                <a href="{url_for('home')}">Home</a>
-                <a href="{url_for('logout')}">Sair</a>
-            </div>
-        </div>
-        <div class="container">
-            <h1>Painel Administrativo</h1>
-
-            <h2>Carros</h2>
-            <a href="{url_for('add_carro')}" class="btn btn-success">Adicionar Carro</a>
-            <a href="{url_for('sync_sheets')}" class="btn">Sincronizar com Sheets</a>
-            <table>
-                <thead>
-                    <tr><th>ID</th><th>Thumbnail</th><th>Modelo</th><th>Marca</th><th>Preço Diária</th><th>Ações</th></tr>
-                </thead>
-                <tbody>
-                    {html_carros}
-                </tbody>
-            </table>
-
-            <h2>Usuários</h2>
-            <a href="{url_for('add_usuario')}" class="btn btn-success">Adicionar Usuário</a>
-            <table>
-                <thead>
-                    <tr><th>ID</th><th>Nome</th><th>Email</th><th>Admin</th><th>Ações</th></tr>
-                </thead>
-                <tbody>
-                    {html_usuarios}
-                </tbody>
-            </table>
-
-            <h2>Reservas</h2>
-            <a href="{url_for('add_reserva')}" class="btn btn-success">Adicionar Reserva</a>
-            <table>
-                <thead>
-                    <tr><th>ID</th><th>Usuário ID</th><th>Carro ID</th><th>Data Reserva</th><th>Status</th><th>Ações</th></tr>
-                </thead>
-                <tbody>
-                    {html_reservas}
-                </tbody>
-            </table>
-        </div>
-    </body>
-    </html>
-    ''')
-
-# Rota para Logout
-@app.route('/logout')
-def logout():
-    session.pop('logged_in', None)
-    session.pop('user_id', None)
-    session.pop('is_admin', None)
-    return redirect(url_for('login'))
-
-# Rota /admin/sync_sheets
 @app.route('/admin/sync_sheets')
-def sync_sheets():
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
-    load_from_sheets() # Recarrega do Sheets para o DB
-    sync_to_sheets()   # Sincroniza do DB para o Sheets
-    return render_template_string('''
-        <script>
-            alert('Sincronização com Sheets concluída.');
-            window.location.href = '/admin';
-        </script>
-    ''')
+@login_required
+@admin_required
+def admin_sync_sheets():
+    load_from_sheets_to_db()
+    sync_db_to_sheets()
+    flash('Sincronização com Google Sheets concluída.', 'success')
+    return redirect(url_for('admin'))
 
-# --- Rotas CRUD para Carros ---
 @app.route('/admin/add_carro', methods=['GET', 'POST'])
-def add_carro():
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
-    conn = get_db_connection()
+@login_required
+@admin_required
+def admin_add_carro():
     if request.method == 'POST':
-        thumbnail_url = request.form.get('thumbnail_url')
-        modelo = request.form.get('modelo')
-        marca = request.form.get('marca')
-        ano = request.form.get('ano')
-        quantidade_disponivel = int(request.form.get('quantidade_disponivel', 0))
-        preco_diaria = float(request.form.get('preco_diaria', 0.0))
-        observacoes = request.form.get('observacoes')
-        max_reservas = int(request.form.get('max_reservas', 1))
-
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO carros (thumbnail_url, modelo, marca, ano, quantidade_disponivel, preco_diaria, observacoes, max_reservas) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                       (thumbnail_url, modelo, marca, ano, quantidade_disponivel, preco_diaria, observacoes, max_reservas))
+        
+        cursor.execute(
+            "INSERT INTO carros (thumbnail_url, modelo, marca, ano, quantidade_disponivel, preco_diaria, observacoes, max_reservas) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                request.form['thumbnail_url'],
+                request.form['modelo'],
+                request.form['marca'],
+                request.form['ano'],
+                int(request.form['quantidade_disponivel']),
+                float(request.form['preco_diaria']),
+                request.form['observacoes'],
+                int(request.form['max_reservas'])
+            )
+        )
         conn.commit()
         conn.close()
-        return redirect(url_for('sync_sheets')) # Sincroniza após adicionar
-    
-    conn.close()
-    return render_template_string('''
-    <html>
-    <head>
-        <title>Adicionar Carro</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 0; background-color: #f8f9fa; }
-            .navbar { background-color: #343a40; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }
-            .navbar a { color: white; text-decoration: none; margin-left: 15px; }
-            .navbar a:hover { text-decoration: underline; }
-            .container { padding: 20px; background-color: white; margin: 20px auto; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; }
-            h1 { color: #333; margin-bottom: 20px; }
-            .form-group { margin-bottom: 15px; }
-            .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
-            .form-group input[type="text"], .form-group input[type="number"] { width: calc(100% - 22px); padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-            .btn { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-            .btn:hover { background-color: #0056b3; }
-        </style>
-    </head>
-    <body>
-        <div class="navbar">
-            <span>Adicionar Carro</span>
-            <div>
-                <a href="/admin">Voltar ao Admin</a>
-                <a href="/logout">Sair</a>
-            </div>
-        </div>
-        <div class="container">
-            <h1>Adicionar Nova Miniatura</h1>
-            <form method="post">
-                <div class="form-group">
-                    <label for="thumbnail_url">URL da Imagem (Thumbnail):</label>
-                    <input type="text" id="thumbnail_url" name="thumbnail_url" required>
-                </div>
-                <div class="form-group">
-                    <label for="modelo">Nome da Miniatura (Modelo):</label>
-                    <input type="text" id="modelo" name="modelo" required>
-                </div>
-                <div class="form-group">
-                    <label for="marca">Marca/Fabricante:</label>
-                    <input type="text" id="marca" name="marca">
-                </div>
-                <div class="form-group">
-                    <label for="ano">Previsão de Chegada (Ano/Data):</label>
-                    <input type="text" id="ano" name="ano">
-                </div>
-                <div class="form-group">
-                    <label for="quantidade_disponivel">Quantidade Disponível:</label>
-                    <input type="number" id="quantidade_disponivel" name="quantidade_disponivel" value="0" required>
-                </div>
-                <div class="form-group">
-                    <label for="preco_diaria">Valor (Preço):</label>
-                    <input type="number" step="0.01" id="preco_diaria" name="preco_diaria" value="0.00" required>
-                </div>
-                <div class="form-group">
-                    <label for="observacoes">Observações:</label>
-                    <input type="text" id="observacoes" name="observacoes">
-                </div>
-                <div class="form-group">
-                    <label for="max_reservas">Máximo de Reservas por Usuário:</label>
-                    <input type="number" id="max_reservas" name="max_reservas" value="1" required>
-                </div>
-                <button type="submit" class="btn">Adicionar Miniatura</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    ''')
+        sync_db_to_sheets() # Sincroniza a mudança de volta para o Sheets
+        flash('Carro adicionado com sucesso!', 'success')
+        return redirect(url_for('admin'))
+    return render_template_string(ADD_CARRO_HTML)
 
 @app.route('/admin/edit_carro/<int:carro_id>', methods=['GET', 'POST'])
-def edit_carro(carro_id):
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
+@login_required
+@admin_required
+def admin_edit_carro(carro_id):
     conn = get_db_connection()
     carro = conn.execute("SELECT * FROM carros WHERE id = ?", (carro_id,)).fetchone()
-
+    
     if request.method == 'POST':
-        thumbnail_url = request.form.get('thumbnail_url')
-        modelo = request.form.get('modelo')
-        marca = request.form.get('marca')
-        ano = request.form.get('ano')
-        quantidade_disponivel = int(request.form.get('quantidade_disponivel', 0))
-        preco_diaria = float(request.form.get('preco_diaria', 0.0))
-        observacoes = request.form.get('observacoes')
-        max_reservas = int(request.form.get('max_reservas', 1))
-
-        conn.execute("UPDATE carros SET thumbnail_url=?, modelo=?, marca=?, ano=?, quantidade_disponivel=?, preco_diaria=?, observacoes=?, max_reservas=? WHERE id=?",
-                       (thumbnail_url, modelo, marca, ano, quantidade_disponivel, preco_diaria, observacoes, max_reservas, carro_id))
+        conn.execute(
+            "UPDATE carros SET thumbnail_url=?, modelo=?, marca=?, ano=?, quantidade_disponivel=?, preco_diaria=?, observacoes=?, max_reservas=? WHERE id=?",
+            (
+                request.form['thumbnail_url'],
+                request.form['modelo'],
+                request.form['marca'],
+                request.form['ano'],
+                int(request.form['quantidade_disponivel']),
+                float(request.form['preco_diaria']),
+                request.form['observacoes'],
+                int(request.form['max_reservas']),
+                carro_id
+            )
+        )
         conn.commit()
         conn.close()
-        return redirect(url_for('sync_sheets'))
+        sync_db_to_sheets()
+        flash('Carro atualizado com sucesso!', 'success')
+        return redirect(url_for('admin'))
     
     conn.close()
     if carro:
-        return render_template_string(f'''
-        <html>
-        <head>
-            <title>Editar Carro</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f8f9fa; }}
-                .navbar {{ background-color: #343a40; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }}
-                .navbar a {{ color: white; text-decoration: none; margin-left: 15px; }}
-                .navbar a:hover {{ text-decoration: underline; }}
-                .container {{ padding: 20px; background-color: white; margin: 20px auto; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; }}
-                h1 {{ color: #333; margin-bottom: 20px; }}
-                .form-group {{ margin-bottom: 15px; }}
-                .form-group label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-                .form-group input[type="text"], .form-group input[type="number"] {{ width: calc(100% - 22px); padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
-                .btn {{ background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }}
-                .btn:hover {{ background-color: #0056b3; }}
-            </style>
-        </head>
-        <body>
-            <div class="navbar">
-                <span>Editar Carro</span>
-                <div>
-                    <a href="/admin">Voltar ao Admin</a>
-                    <a href="/logout">Sair</a>
-                </div>
-            </div>
-            <div class="container">
-                <h1>Editar Miniatura: {carro['modelo']}</h1>
-                <form method="post">
-                    <div class="form-group">
-                        <label for="thumbnail_url">URL da Imagem (Thumbnail):</label>
-                        <input type="text" id="thumbnail_url" name="thumbnail_url" value="{carro['thumbnail_url']}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="modelo">Nome da Miniatura (Modelo):</label>
-                        <input type="text" id="modelo" name="modelo" value="{carro['modelo']}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="marca">Marca/Fabricante:</label>
-                        <input type="text" id="marca" name="marca" value="{carro['marca']}">
-                    </div>
-                    <div class="form-group">
-                        <label for="ano">Previsão de Chegada (Ano/Data):</label>
-                        <input type="text" id="ano" name="ano" value="{carro['ano']}">
-                    </div>
-                    <div class="form-group">
-                        <label for="quantidade_disponivel">Quantidade Disponível:</label>
-                        <input type="number" id="quantidade_disponivel" name="quantidade_disponivel" value="{carro['quantidade_disponivel']}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="preco_diaria">Valor (Preço):</label>
-                        <input type="number" step="0.01" id="preco_diaria" name="preco_diaria" value="{carro['preco_diaria']}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="observacoes">Observações:</label>
-                        <input type="text" id="observacoes" name="observacoes" value="{carro['observacoes']}">
-                    </div>
-                    <div class="form-group">
-                        <label for="max_reservas">Máximo de Reservas por Usuário:</label>
-                        <input type="number" id="max_reservas" name="max_reservas" value="{carro['max_reservas']}" required>
-                    </div>
-                    <button type="submit" class="btn">Salvar Alterações</button>
-                </form>
-            </div>
-        </body>
-        </html>
-        ''')
-    return "Carro não encontrado", 404
+        return render_template_string(EDIT_CARRO_HTML, carro=dict(carro))
+    flash('Carro não encontrado.', 'danger')
+    return redirect(url_for('admin'))
 
 @app.route('/admin/delete_carro/<int:carro_id>')
-def delete_carro(carro_id):
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
+@login_required
+@admin_required
+def admin_delete_carro(carro_id):
     conn = get_db_connection()
     conn.execute("DELETE FROM carros WHERE id = ?", (carro_id,))
     conn.commit()
     conn.close()
-    return redirect(url_for('sync_sheets'))
+    sync_db_to_sheets()
+    flash('Carro deletado com sucesso!', 'success')
+    return redirect(url_for('admin'))
 
-# --- Rotas CRUD para Usuários (Simplificadas) ---
-@app.route('/admin/add_usuario', methods=['GET', 'POST'])
-def add_usuario():
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
-    conn = get_db_connection()
-    if request.method == 'POST':
-        nome = request.form.get('nome')
-        email = request.form.get('email')
-        senha = request.form.get('senha')
-        senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-        cpf = request.form.get('cpf')
-        telefone = request.form.get('telefone')
-        admin = True if request.form.get('admin') == 'on' else False
-        data_cadastro = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+# --- HTML Templates Inline (para self-contained) ---
+BASE_CSS = '''
+<style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; background-color: #f4f7f6; color: #333; }
+    .container { max-width: 1200px; margin: 20px auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+    .header { background-color: #007bff; color: white; padding: 15px 20px; border-radius: 8px 8px 0 0; display: flex; justify-content: space-between; align-items: center; }
+    .header h1 { margin: 0; font-size: 1.8em; }
+    .header .nav-links a { color: white; text-decoration: none; margin-left: 20px; font-weight: bold; }
+    .header .nav-links a:hover { text-decoration: underline; }
+    .flash-messages { margin-top: 15px; padding: 10px; border-radius: 5px; }
+    .flash-messages.success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+    .flash-messages.danger { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    .flash-messages.info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+    .grid-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 25px; margin-top: 30px; }
+    .card { background-color: #fff; border: 1px solid #e0e0e0; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.05); transition: transform 0.2s ease-in-out; }
+    .card:hover { transform: translateY(-5px); box-shadow: 0 6px 16px rgba(0,0,0,0.1); }
+    .card img { width: 100%; height: 200px; object-fit: cover; border-bottom: 1px solid #eee; }
+    .card-content { padding: 15px; }
+    .card-content h3 { margin-top: 0; margin-bottom: 10px; color: #007bff; font-size: 1.4em; }
+    .card-content p { margin: 5px 0; font-size: 0.95em; line-height: 1.4; }
+    .card-content .price { font-size: 1.2em; font-weight: bold; color: #28a745; margin-top: 10px; }
+    .card-content button { background-color: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; font-size: 1em; margin-top: 15px; width: 100%; transition: background-color 0.2s; }
+    .card-content button:hover { background-color: #0056b3; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+    .form-group input[type="text"], .form-group input[type="email"], .form-group input[type="password"], .form-group input[type="number"] {
+        width: calc(100% - 22px); padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-size: 1em;
+    }
+    .form-group button { background-color: #28a745; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 1em; transition: background-color 0.2s; }
+    .form-group button:hover { background-color: #218838; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+    th { background-color: #f2f2f2; font-weight: bold; }
+    .admin-actions a { margin-right: 10px; color: #007bff; text-decoration: none; }
+    .admin-actions a:hover { text-decoration: underline; }
+    .add-button { display: inline-block; background-color: #007bff; color: white; padding: 10px 15px; border-radius: 5px; text-decoration: none; margin-top: 15px; }
+    .add-button:hover { background-color: #0056b3; }
+</style>
+'''
 
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO usuarios (nome, email, senha_hash, cpf, telefone, data_cadastro, admin) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                       (nome, email, senha_hash, cpf, telefone, data_cadastro, admin))
-        conn.commit()
-        conn.close()
-        return redirect(url_for('sync_sheets'))
-    
-    conn.close()
-    return render_template_string('''
-    <html>
-    <head>
-        <title>Adicionar Usuário</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 0; background-color: #f8f9fa; }
-            .navbar { background-color: #343a40; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }
-            .navbar a { color: white; text-decoration: none; margin-left: 15px; }
-            .navbar a:hover { text-decoration: underline; }
-            .container { padding: 20px; background-color: white; margin: 20px auto; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; }
-            h1 { color: #333; margin-bottom: 20px; }
-            .form-group { margin-bottom: 15px; }
-            .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
-            .form-group input[type="text"], .form-group input[type="email"], .form-group input[type="password"] { width: calc(100% - 22px); padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-            .form-group input[type="checkbox"] { margin-right: 5px; }
-            .btn { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-            .btn:hover { background-color: #0056b3; }
-        </style>
-    </head>
-    <body>
-        <div class="navbar">
-            <span>Adicionar Usuário</span>
-            <div>
-                <a href="/admin">Voltar ao Admin</a>
-                <a href="/logout">Sair</a>
-            </div>
+LOGIN_HTML = BASE_CSS + '''
+<div class="container">
+    <div class="header">
+        <h1>Login - JG Minis</h1>
+    </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash-messages {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    <form method="post" class="container" style="max-width: 400px; margin-top: 20px;">
+        <div class="form-group">
+            <label for="email">Email:</label>
+            <input type="email" id="email" name="email" required>
         </div>
-        <div class="container">
-            <h1>Adicionar Novo Usuário</h1>
-            <form method="post">
-                <div class="form-group">
-                    <label for="nome">Nome:</label>
-                    <input type="text" id="nome" name="nome" required>
-                </div>
-                <div class="form-group">
-                    <label for="email">Email:</label>
-                    <input type="email" id="email" name="email" required>
-                </div>
-                <div class="form-group">
-                    <label for="senha">Senha:</label>
-                    <input type="password" id="senha" name="senha" required>
-                </div>
-                <div class="form-group">
-                    <label for="cpf">CPF:</label>
-                    <input type="text" id="cpf" name="cpf">
-                </div>
-                <div class="form-group">
-                    <label for="telefone">Telefone:</label>
-                    <input type="text" id="telefone" name="telefone">
-                </div>
-                <div class="form-group">
-                    <input type="checkbox" id="admin" name="admin">
-                    <label for="admin">Administrador</label>
-                </div>
-                <button type="submit" class="btn">Adicionar Usuário</button>
-            </form>
+        <div class="form-group">
+            <label for="senha">Senha:</label>
+            <input type="password" id="senha" name="senha" required>
         </div>
-    </body>
-    </html>
-    ''')
-
-@app.route('/admin/edit_usuario/<int:usuario_id>', methods=['GET', 'POST'])
-def edit_usuario(usuario_id):
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
-    conn = get_db_connection()
-    usuario = conn.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
-
-    if request.method == 'POST':
-        nome = request.form.get('nome')
-        email = request.form.get('email')
-        senha = request.form.get('senha')
-        cpf = request.form.get('cpf')
-        telefone = request.form.get('telefone')
-        admin = True if request.form.get('admin') == 'on' else False
-        
-        update_query = "UPDATE usuarios SET nome=?, email=?, cpf=?, telefone=?, admin=? WHERE id=?"
-        update_params = [nome, email, cpf, telefone, admin, usuario_id]
-
-        if senha: # Atualiza senha apenas se fornecida
-            senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-            update_query = "UPDATE usuarios SET nome=?, email=?, senha_hash=?, cpf=?, telefone=?, admin=? WHERE id=?"
-            update_params = [nome, email, senha_hash, cpf, telefone, admin, usuario_id]
-
-        conn.execute(update_query, tuple(update_params))
-        conn.commit()
-        conn.close()
-        return redirect(url_for('sync_sheets'))
-    
-    conn.close()
-    if usuario:
-        return render_template_string(f'''
-        <html>
-        <head>
-            <title>Editar Usuário</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f8f9fa; }}
-                .navbar {{ background-color: #343a40; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }}
-                .navbar a {{ color: white; text-decoration: none; margin-left: 15px; }}
-                .navbar a:hover {{ text-decoration: underline; }}
-                .container {{ padding: 20px; background-color: white; margin: 20px auto; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; }}
-                h1 {{ color: #333; margin-bottom: 20px; }}
-                .form-group {{ margin-bottom: 15px; }}
-                .form-group label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-                .form-group input[type="text"], .form-group input[type="email"], .form-group input[type="password"] {{ width: calc(100% - 22px); padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
-                .form-group input[type="checkbox"] {{ margin-right: 5px; }}
-                .btn {{ background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }}
-                .btn:hover {{ background-color: #0056b3; }}
-            </style>
-        </head>
-        <body>
-            <div class="navbar">
-                <span>Editar Usuário</span>
-                <div>
-                    <a href="/admin">Voltar ao Admin</a>
-                    <a href="/logout">Sair</a>
-                </div>
-            </div>
-            <div class="container">
-                <h1>Editar Usuário: {usuario['nome']}</h1>
-                <form method="post">
-                    <div class="form-group">
-                        <label for="nome">Nome:</label>
-                        <input type="text" id="nome" name="nome" value="{usuario['nome']}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="email">Email:</label>
-                        <input type="email" id="email" name="email" value="{usuario['email']}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="senha">Nova Senha (deixe em branco para não alterar):</label>
-                        <input type="password" id="senha" name="senha">
-                    </div>
-                    <div class="form-group">
-                        <label for="cpf">CPF:</label>
-                        <input type="text" id="cpf" name="cpf" value="{usuario['cpf'] or ''}">
-                    </div>
-                    <div class="form-group">
-                        <label for="telefone">Telefone:</label>
-                        <input type="text" id="telefone" name="telefone" value="{usuario['telefone'] or ''}">
-                    </div>
-                    <div class="form-group">
-                        <input type="checkbox" id="admin" name="admin" {'checked' if usuario['admin'] else ''}>
-                        <label for="admin">Administrador</label>
-                    </div>
-                    <button type="submit" class="btn">Salvar Alterações</button>
-                </form>
-            </div>
-        </body>
-        </html>
-        ''')
-    return "Usuário não encontrado", 404
-
-@app.route('/admin/delete_usuario/<int:usuario_id>')
-def delete_usuario(usuario_id):
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
-    conn = get_db_connection()
-    conn.execute("DELETE FROM usuarios WHERE id = ?", (usuario_id,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('sync_sheets'))
-
-# --- Rotas CRUD para Reservas (Simplificadas) ---
-@app.route('/admin/add_reserva', methods=['GET', 'POST'])
-def add_reserva():
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
-    conn = get_db_connection()
-    if request.method == 'POST':
-        usuario_id = int(request.form.get('usuario_id', 0))
-        carro_id = int(request.form.get('carro_id', 0))
-        data_reserva = request.form.get('data_reserva')
-        hora_inicio = request.form.get('hora_inicio')
-        hora_fim = request.form.get('hora_fim')
-        status = request.form.get('status', 'pendente')
-        observacoes = request.form.get('observacoes')
-
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                       (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes))
-        conn.commit()
-        conn.close()
-        return redirect(url_for('sync_sheets'))
-    
-    usuarios_db = conn.execute("SELECT id, nome FROM usuarios").fetchall()
-    carros_db = conn.execute("SELECT id, modelo FROM carros").fetchall()
-    conn.close()
-
-    usuarios_options = "".join([f"<option value='{u['id']}'>{u['nome']} (ID: {u['id']})</option>" for u in usuarios_db])
-    carros_options = "".join([f"<option value='{c['id']}'>{c['modelo']} (ID: {c['id']})</option>" for c in carros_db])
-
-    return render_template_string(f'''
-    <html>
-    <head>
-        <title>Adicionar Reserva</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f8f9fa; }}
-            .navbar {{ background-color: #343a40; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }}
-            .navbar a {{ color: white; text-decoration: none; margin-left: 15px; }}
-            .navbar a:hover {{ text-decoration: underline; }}
-            .container {{ padding: 20px; background-color: white; margin: 20px auto; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; }}
-            h1 {{ color: #333; margin-bottom: 20px; }}
-            .form-group {{ margin-bottom: 15px; }}
-            .form-group label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-            .form-group input[type="text"], .form-group input[type="date"], .form-group input[type="time"], .form-group select {{ width: calc(100% - 22px); padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
-            .btn {{ background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }}
-            .btn:hover {{ background-color: #0056b3; }}
-        </style>
-    </head>
-    <body>
-        <div class="navbar">
-            <span>Adicionar Reserva</span>
-            <div>
-                <a href="/admin">Voltar ao Admin</a>
-                <a href="/logout">Sair</a>
-            </div>
+        <div class="form-group">
+            <button type="submit">Entrar</button>
         </div>
-        <div class="container">
-            <h1>Adicionar Nova Reserva</h1>
-            <form method="post">
-                <div class="form-group">
-                    <label for="usuario_id">Usuário:</label>
-                    <select id="usuario_id" name="usuario_id" required>
-                        {usuarios_options}
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="carro_id">Miniatura (Carro):</label>
-                    <select id="carro_id" name="carro_id" required>
-                        {carros_options}
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="data_reserva">Data da Reserva:</label>
-                    <input type="date" id="data_reserva" name="data_reserva" required>
-                </div>
-                <div class="form-group">
-                    <label for="hora_inicio">Hora Início:</label>
-                    <input type="time" id="hora_inicio" name="hora_inicio">
-                </div>
-                <div class="form-group">
-                    <label for="hora_fim">Hora Fim:</label>
-                    <input type="time" id="hora_fim" name="hora_fim">
-                </div>
-                <div class="form-group">
-                    <label for="status">Status:</label>
-                    <select id="status" name="status">
-                        <option value="pendente">Pendente</option>
-                        <option value="confirmada">Confirmada</option>
-                        <option value="cancelada">Cancelada</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="observacoes">Observações:</label>
-                    <input type="text" id="observacoes" name="observacoes">
-                </div>
-                <button type="submit" class="btn">Adicionar Reserva</button>
-            </form>
+    </form>
+</div>
+'''
+
+HOME_HTML = BASE_CSS + '''
+<div class="container">
+    <div class="header">
+        <h1>Bem-vindo ao JG Minis!</h1>
+        <div class="nav-links">
+            {% if is_admin %}<a href="/admin">Admin</a>{% endif %}
+            <a href="/logout">Sair</a>
         </div>
-    </body>
-    </html>
-    ''')
-
-@app.route('/admin/edit_reserva/<int:reserva_id>', methods=['GET', 'POST'])
-def edit_reserva(reserva_id):
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
-    conn = get_db_connection()
-    reserva = conn.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
-    usuarios_db = conn.execute("SELECT id, nome FROM usuarios").fetchall()
-    carros_db = conn.execute("SELECT id, modelo FROM carros").fetchall()
-
-    if request.method == 'POST':
-        usuario_id = int(request.form.get('usuario_id', 0))
-        carro_id = int(request.form.get('carro_id', 0))
-        data_reserva = request.form.get('data_reserva')
-        hora_inicio = request.form.get('hora_inicio')
-        hora_fim = request.form.get('hora_fim')
-        status = request.form.get('status', 'pendente')
-        observacoes = request.form.get('observacoes')
-
-        conn.execute("UPDATE reservas SET usuario_id=?, carro_id=?, data_reserva=?, hora_inicio=?, hora_fim=?, status=?, observacoes=? WHERE id=?",
-                       (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes, reserva_id))
-        conn.commit()
-        conn.close()
-        return redirect(url_for('sync_sheets'))
-    
-    conn.close()
-    if reserva:
-        usuarios_options = "".join([f"<option value='{u['id']}' {'selected' if u['id'] == reserva['usuario_id'] else ''}>{u['nome']} (ID: {u['id']})</option>" for u in usuarios_db])
-        carros_options = "".join([f"<option value='{c['id']}' {'selected' if c['id'] == reserva['carro_id'] else ''}>{c['modelo']} (ID: {c['id']})</option>" for c in carros_db])
-
-        return render_template_string(f'''
-        <html>
-        <head>
-            <title>Editar Reserva</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 0; background-color: #f8f9fa; }}
-                .navbar {{ background-color: #343a40; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }}
-                .navbar a {{ color: white; text-decoration: none; margin-left: 15px; }}
-                .navbar a:hover {{ text-decoration: underline; }}
-                .container {{ padding: 20px; background-color: white; margin: 20px auto; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; }}
-                h1 {{ color: #333; margin-bottom: 20px; }}
-                .form-group {{ margin-bottom: 15px; }}
-                .form-group label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-                .form-group input[type="text"], .form-group input[type="date"], .form-group input[type="time"], .form-group select {{ width: calc(100% - 22px); padding: 8px; border: 1px solid #ddd; border-radius: 4px; }}
-                .btn {{ background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }}
-                .btn:hover {{ background-color: #0056b3; }}
-            </style>
-        </head>
-        <body>
-            <div class="navbar">
-                <span>Editar Reserva</span>
-                <div>
-                    <a href="/admin">Voltar ao Admin</a>
-                    <a href="/logout">Sair</a>
+    </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash-messages {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    <h2>Nossas Miniaturas Disponíveis</h2>
+    {% if carros %}
+        <div class="grid-container">
+            {% for carro in carros %}
+                <div class="card">
+                    <img src="{{ carro.thumbnail_url }}" alt="{{ carro.modelo }}">
+                    <div class="card-content">
+                        <h3>{{ carro.modelo }}</h3>
+                        <p><strong>Marca:</strong> {{ carro.marca }}</p>
+                        <p><strong>Previsão:</strong> {{ carro.ano }}</p>
+                        <p><strong>Disponível:</strong> {{ carro.quantidade_disponivel }} unidades</p>
+                        <p class="price">R$ {{ "%.2f"|format(carro.preco_diaria) }} / dia</p>
+                        <button onclick="alert('Funcionalidade de reserva em desenvolvimento para {{ carro.modelo }} (ID: {{ carro.id }})')">Reservar</button>
+                    </div>
                 </div>
-            </div>
-            <div class="container">
-                <h1>Editar Reserva ID: {reserva['id']}</h1>
-                <form method="post">
-                    <div class="form-group">
-                        <label for="usuario_id">Usuário:</label>
-                        <select id="usuario_id" name="usuario_id" required>
-                            {usuarios_options}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="carro_id">Miniatura (Carro):</label>
-                        <select id="carro_id" name="carro_id" required>
-                            {carros_options}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="data_reserva">Data da Reserva:</label>
-                        <input type="date" id="data_reserva" name="data_reserva" value="{reserva['data_reserva']}" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="hora_inicio">Hora Início:</label>
-                        <input type="time" id="hora_inicio" name="hora_inicio" value="{reserva['hora_inicio'] or ''}">
-                    </div>
-                    <div class="form-group">
-                        <label for="hora_fim">Hora Fim:</label>
-                        <input type="time" id="hora_fim" name="hora_fim" value="{reserva['hora_fim'] or ''}">
-                    </div>
-                    <div class="form-group">
-                        <label for="status">Status:</label>
-                        <select id="status" name="status">
-                            <option value="pendente" {'selected' if reserva['status'] == 'pendente' else ''}>Pendente</option>
-                            <option value="confirmada" {'selected' if reserva['status'] == 'confirmada' else ''}>Confirmada</option>
-                            <option value="cancelada" {'selected' if reserva['status'] == 'cancelada' else ''}>Cancelada</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="observacoes">Observações:</label>
-                        <input type="text" id="observacoes" name="observacoes" value="{reserva['observacoes'] or ''}">
-                    </div>
-                    <button type="submit" class="btn">Salvar Alterações</button>
-                </form>
-            </div>
-        </body>
-        </html>
-        ''')
-    return "Reserva não encontrada", 404
+            {% endfor %}
+        </div>
+    {% else %}
+        <p>Nenhuma miniatura disponível no momento.</p>
+    {% endif %}
+</div>
+'''
 
-@app.route('/admin/delete_reserva/<int:reserva_id>')
-def delete_reserva(reserva_id):
-    if not session.get('logged_in') or not session.get('is_admin'):
-        return redirect(url_for('login'))
-    
-    conn = get_db_connection()
-    conn.execute("DELETE FROM reservas WHERE id = ?", (reserva_id,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('sync_sheets'))
+ADMIN_HTML = BASE_CSS + '''
+<div class="container">
+    <div class="header">
+        <h1>Painel Administrativo</h1>
+        <div class="nav-links">
+            <a href="/home">Home</a>
+            <a href="/logout">Sair</a>
+        </div>
+    </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash-messages {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <h2>Gerenciar Carros (Miniaturas)</h2>
+    <a href="/admin/add_carro" class="add-button">Adicionar Nova Miniatura</a>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Imagem</th>
+                <th>Modelo</th>
+                <th>Marca</th>
+                <th>Preço Diário</th>
+                <th>Disponível</th>
+                <th>Ações</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for carro in carros %}
+            <tr>
+                <td>{{ carro.id }}</td>
+                <td><img src="{{ carro.thumbnail_url }}" alt="{{ carro.modelo }}" style="width: 50px; height: 50px; object-fit: cover;"></td>
+                <td>{{ carro.modelo }}</td>
+                <td>{{ carro.marca }}</td>
+                <td>R$ {{ "%.2f"|format(carro.preco_diaria) }}</td>
+                <td>{{ carro.quantidade_disponivel }}</td>
+                <td class="admin-actions">
+                    <a href="/admin/edit_carro/{{ carro.id }}">Editar</a>
+                    <a href="/admin/delete_carro/{{ carro.id }}" onclick="return confirm('Tem certeza que deseja deletar {{ carro.modelo }}?')">Deletar</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h2>Gerenciar Usuários</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Nome</th>
+                <th>Email</th>
+                <th>Admin</th>
+                <th>Ações</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for usuario in usuarios %}
+            <tr>
+                <td>{{ usuario.id }}</td>
+                <td>{{ usuario.nome }}</td>
+                <td>{{ usuario.email }}</td>
+                <td>{% if usuario.is_admin %}Sim{% else %}Não{% endif %}</td>
+                <td class="admin-actions">
+                    <a href="#">Editar</a>
+                    <a href="#">Deletar</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h2>Gerenciar Reservas</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Usuário ID</th>
+                <th>Carro ID</th>
+                <th>Data</th>
+                <th>Status</th>
+                <th>Ações</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for reserva in reservas %}
+            <tr>
+                <td>{{ reserva.id }}</td>
+                <td>{{ reserva.usuario_id }}</td>
+                <td>{{ reserva.carro_id }}</td>
+                <td>{{ reserva.data_reserva }}</td>
+                <td>{{ reserva.status }}</td>
+                <td class="admin-actions">
+                    <a href="#">Editar</a>
+                    <a href="#">Deletar</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div style="margin-top: 30px;">
+        <a href="/admin/sync_sheets" class="add-button" style="background-color: #28a745;">Sincronizar com Google Sheets</a>
+    </div>
+</div>
+'''
+
+ADD_CARRO_HTML = BASE_CSS + '''
+<div class="container">
+    <div class="header">
+        <h1>Adicionar Nova Miniatura</h1>
+        <div class="nav-links">
+            <a href="/admin">Voltar ao Admin</a>
+            <a href="/logout">Sair</a>
+        </div>
+    </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash-messages {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    <form method="post" class="container" style="max-width: 600px; margin-top: 20px;">
+        <div class="form-group">
+            <label for="thumbnail_url">URL da Imagem (Thumbnail):</label>
+            <input type="text" id="thumbnail_url" name="thumbnail_url" required>
+        </div>
+        <div class="form-group">
+            <label for="modelo">Nome da Miniatura (Modelo):</label>
+            <input type="text" id="modelo" name="modelo" required>
+        </div>
+        <div class="form-group">
+            <label for="marca">Marca/Fabricante:</label>
+            <input type="text" id="marca" name="marca">
+        </div>
+        <div class="form-group">
+            <label for="ano">Previsão de Chegada (Ano/Período):</label>
+            <input type="text" id="ano" name="ano">
+        </div>
+        <div class="form-group">
+            <label for="quantidade_disponivel">Quantidade Disponível:</label>
+            <input type="number" id="quantidade_disponivel" name="quantidade_disponivel" required min="0">
+        </div>
+        <div class="form-group">
+            <label for="preco_diaria">Valor (Preço):</label>
+            <input type="number" id="preco_diaria" name="preco_diaria" step="0.01" required min="0">
+        </div>
+        <div class="form-group">
+            <label for="observacoes">Observações:</label>
+            <input type="text" id="observacoes" name="observacoes">
+        </div>
+        <div class="form-group">
+            <label for="max_reservas">Máx. Reservas por Usuário:</label>
+            <input type="number" id="max_reservas" name="max_reservas" required min="1">
+        </div>
+        <div class="form-group">
+            <button type="submit">Adicionar Miniatura</button>
+        </div>
+    </form>
+</div>
+'''
+
+EDIT_CARRO_HTML = BASE_CSS + '''
+<div class="container">
+    <div class="header">
+        <h1>Editar Miniatura</h1>
+        <div class="nav-links">
+            <a href="/admin">Voltar ao Admin</a>
+            <a href="/logout">Sair</a>
+        </div>
+    </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash-messages {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    <form method="post" class="container" style="max-width: 600px; margin-top: 20px;">
+        <div class="form-group">
+            <label for="thumbnail_url">URL da Imagem (Thumbnail):</label>
+            <input type="text" id="thumbnail_url" name="thumbnail_url" value="{{ carro.thumbnail_url }}" required>
+        </div>
+        <div class="form-group">
+            <label for="modelo">Nome da Miniatura (Modelo):</label>
+            <input type="text" id="modelo" name="modelo" value="{{ carro.modelo }}" required>
+        </div>
+        <div class="form-group">
+            <label for="marca">Marca/Fabricante:</label>
+            <input type="text" id="marca" name="marca" value="{{ carro.marca }}">
+        </div>
+        <div class="form-group">
+            <label for="ano">Previsão de Chegada (Ano/Período):</label>
+            <input type="text" id="ano" name="ano" value="{{ carro.ano }}">
+        </div>
+        <div class="form-group">
+            <label for="quantidade_disponivel">Quantidade Disponível:</label>
+            <input type="number" id="quantidade_disponivel" name="quantidade_disponivel" value="{{ carro.quantidade_disponivel }}" required min="0">
+        </div>
+        <div class="form-group">
+            <label for="preco_diaria">Valor (Preço):</label>
+            <input type="number" id="preco_diaria" name="preco_diaria" step="0.01" value="{{ carro.preco_diaria }}" required min="0">
+        </div>
+        <div class="form-group">
+            <label for="observacoes">Observações:</label>
+            <input type="text" id="observacoes" name="observacoes" value="{{ carro.observacoes }}">
+        </div>
+        <div class="form-group">
+            <label for="max_reservas">Máx. Reservas por Usuário:</label>
+            <input type="number" id="max_reservas" name="max_reservas" value="{{ carro.max_reservas }}" required min="1">
+        </div>
+        <div class="form-group">
+            <button type="submit">Salvar Alterações</button>
+        </div>
+    </form>
+</div>
+'''
 
 if __name__ == '__main__':
     app.run(debug=True)
