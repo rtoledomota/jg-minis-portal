@@ -21,7 +21,7 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.15') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.16') # Chave secreta para sessões
 
 # Caminho do banco de dados (persistente no Railway via /tmp)
 DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db')
