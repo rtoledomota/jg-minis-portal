@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JG Minis - Reservar {{ car.modelo }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }
+        .container { max-width: 600px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; }
+        label { display: block; margin-bottom: 5px; color: #555; }
+        input[type="date"], input[type="time"], textarea {
+            width: calc(100% - 20px);
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background-color: #0056b3; }
+        .flash { padding: 10px; margin-bottom: 15px; border-radius: 5px; }
+        .flash.success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .flash.error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .flash.info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .flash.warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Reservar {{ car.modelo }} ({{ car.placa }})</h1>
+        <p>Preço: R$ {{ "%.2f"|format(car.preco_diaria) }} / dia</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <form method="POST">
+            <label for="data_reserva">Data da Reserva:</label>
+            <input type="date" id="data_reserva" name="data_reserva" required>
+
+            <label for="hora_inicio">Hora de Início:</label>
+            <input type="time" id="hora_inicio" name="hora_inicio" required>
+
+            <label for="hora_fim">Hora de Fim:</label>
+            <input type="time" id="hora_fim" name="hora_fim" required>
+
+            <label for="observacoes">Observações (opcional):</label>
+            <textarea id="observacoes" name="observacoes" rows="4"></textarea>
+
+            <button type="submit">Confirmar Reserva</button>
+        </form>
+        <p><a href="{{ url_for('home') }}">Voltar para a Home</a></p>
+    </div>
+</body>
+</html>
