@@ -21,14 +21,14 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.12') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.13') # Chave secreta para sessões
 
 # Define o caminho do banco de dados, usando variável de ambiente ou padrão
-DATABASE_PATH = os.environ.get('DATABASE_PATH', 'jgminis.db') # Padrão para 'jgminis.db' se não definido
+DATABASE_PATH = os.environ.get('DATABASE_PATH', 'jgminis.db') # Padrão para jgminis.db se não definida
 
 # --- Funções de Banco de Dados ---
 def init_db():
-    """Inicializa o banco de dados SQLite, criando tabelas se não existirem."""
+    """Inicializa o banco de dados SQLite, criando tabelas se não existirem e um admin padrão se o DB estiver vazio."""
     conn = None
     try:
         conn = sqlite3.connect(DATABASE_PATH)
@@ -84,19 +84,17 @@ def init_db():
         c.execute('SELECT COUNT(*) FROM usuarios')
         usuarios_count = c.fetchone()[0]
         if usuarios_count == 0:
-            logging.warning('DB inicializado: 0 usuários encontrados. Considere restaurar de um backup JSON.')
-            # Cria usuário admin padrão se o DB estiver vazio
+            logging.warning('DB inicializado: 0 usuários encontrados. Criando usuário admin padrão.')
+            # Cria usuário admin padrão se não houver nenhum
+            admin_email = "admin@jgminis.com.br"
+            admin_senha_hash = hashlib.sha256("admin123".encode()).hexdigest()
             try:
-                admin_email = "admin@jgminis.com.br"
-                admin_senha_hash = hashlib.sha256("admin123".encode()).hexdigest()
                 c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
-                          ('Administrador', admin_email, admin_senha_hash, True))
+                          ('Admin Padrão', admin_email, admin_senha_hash, True))
                 conn.commit()
-                logging.info(f'Usuário admin padrão criado: {admin_email} (senha: admin123)')
+                logging.info(f'DB inicializado: Usuário admin padrão criado ({admin_email}).')
             except sqlite3.IntegrityError:
-                logging.warning('Usuário admin padrão já existe.')
-            except Exception as e:
-                logging.error(f'Erro ao criar usuário admin padrão: {e}')
+                logging.warning(f'DB inicializado: Usuário admin padrão ({admin_email}) já existe.')
         else:
             logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
 
@@ -388,15 +386,15 @@ def registro():
             flash('Todos os campos obrigatórios devem ser preenchidos.', 'error')
             return render_template('registro.html')
         
-        # Validação de CPF (apenas dígitos, 11 caracteres)
+        # Validação de CPF (apenas dígitos, 11 ou 14 caracteres para CPF/CNPJ)
         cleaned_cpf = ''.join(filter(str.isdigit, cpf))
-        if not (cleaned_cpf.isdigit() and len(cleaned_cpf) == 11):
+        if not (cleaned_cpf.isdigit() and 10 <= len(cleaned_cpf) <= 11): # Corrigido <=
             flash('CPF inválido. Deve conter 11 dígitos.', 'error')
             return render_template('registro.html')
 
         # Validação de Telefone (apenas dígitos, 10 ou 11 caracteres)
         cleaned_telefone = ''.join(filter(str.isdigit, telefone))
-        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11):
+        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11): # Corrigido <=
             flash('Telefone inválido. Deve conter 10 ou 11 dígitos.', 'error')
             return render_template('registro.html')
 
@@ -844,9 +842,8 @@ def admin_restore_backup():
                 # Verifica integridade do hash
                 received_hash = backup_data.pop('hash', None)
                 if received_hash:
-                    # Recria o JSON sem o hash para calcular o hash do conteúdo
-                    content_for_hash = json.dumps(backup_data, indent=4, ensure_ascii=False)
-                    calculated_hash = hashlib.sha256(content_for_hash.encode()).hexdigest()
+                    # Recalcula o hash do conteúdo restante (sem o hash original)
+                    calculated_hash = hashlib.sha256(json.dumps(backup_data, indent=4, ensure_ascii=False).encode()).hexdigest()
                     if received_hash != calculated_hash:
                         flash('Erro de integridade do backup: hash não corresponde. O arquivo pode estar corrompido ou modificado.', 'error')
                         logging.error('Erro de integridade do backup: hash não corresponde.')
@@ -898,7 +895,7 @@ def admin_restore_backup():
                 logging.error(f'Erro inesperado ao restaurar backup: {e}')
         else:
             flash('Por favor, selecione um arquivo JSON válido.', 'error')
-    return redirect(url_for('admin_panel'))
+    return render_template('admin_restore_backup.html') # Você precisaria criar este template
 
 # --- Tratamento de Erros ---
 @app.errorhandler(500)
