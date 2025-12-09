@@ -21,7 +21,7 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.14') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.15') # Chave secreta para sessões
 
 # Caminho do banco de dados (persistente no Railway via /tmp)
 DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db')
@@ -402,13 +402,13 @@ def registro():
         
         # Validação de CPF (apenas dígitos, 11 caracteres)
         cleaned_cpf = ''.join(filter(str.isdigit, cpf))
-        if not (cleaned_cpf.isdigit() and len(cleaned_cpf) == 11): # Corrigido: == 11 para 11 dígitos exatos
+        if not (cleaned_cpf.isdigit() and len(cleaned_cpf) == 11):  # Corrigido: == 11 para 11 dígitos exatos
             flash('CPF inválido. Deve conter 11 dígitos.', 'error')
             return render_template('registro.html')
 
         # Validação de Telefone (apenas dígitos, 10 ou 11 caracteres)
         cleaned_telefone = ''.join(filter(str.isdigit, telefone))
-        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11): # Corrigido: <= correto
+        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11):  # Corrigido: <= correto
             flash('Telefone inválido. Deve conter 10 ou 11 dígitos.', 'error')
             return render_template('registro.html')
 
@@ -726,7 +726,7 @@ def admin_update_reserva_status(reserva_id, status):
         conn.execute('UPDATE reservas SET status = ? WHERE id = ?', (status, reserva_id))
         conn.commit()
         flash(f'Status da reserva {reserva_id} atualizado para "{status}" com sucesso!', 'success')
-        logging.info(f'Status da reserva {reserva_id} atualizado para: {status}')
+        logging.info(f'Reserva {reserva_id} status atualizado para: {status}')
         sync_reservas_to_sheets() # Sincroniza após atualizar status
     except Exception as e:
         flash(f'Erro ao atualizar status da reserva: {e}', 'error')
@@ -876,7 +876,7 @@ def admin_restore_backup():
                     c.execute('INSERT INTO usuarios (id, nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                               (user_data['id'], user_data['nome'], user_data['email'], user_data['senha_hash'], user_data['cpf'], user_data['telefone'], user_data['data_cadastro'], user_data['is_admin']))
                 
-                # Restaura reservas (CORRIGIDO: string SQL completa)
+                # Restaura reservas (CORRIGIDO: string SQL completa e fechada)
                 for reserva_data in backup_data.get('reservas', []):
                     c.execute('INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                               (reserva_data['id'], reserva_data['usuario_id'], reserva_data['carro_id'], reserva_data['data_reserva'], reserva_data['hora_inicio'], reserva_data['hora_fim'], reserva_data['status'], reserva_data['observacoes']))
