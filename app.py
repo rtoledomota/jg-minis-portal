@@ -21,10 +21,10 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.11') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.12') # Chave secreta para sessões
 
-# Define o caminho do banco de dados, usando variável de ambiente ou padrão
-DATABASE_PATH = os.environ.get('DATABASE_PATH', 'jgminis.db')
+# Caminho do banco de dados (persistente no Railway via /tmp)
+DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db')
 
 # --- Funções de Banco de Dados ---
 def init_db():
@@ -84,14 +84,7 @@ def init_db():
         c.execute('SELECT COUNT(*) FROM usuarios')
         usuarios_count = c.fetchone()[0]
         if usuarios_count == 0:
-            logging.warning('DB inicializado: 0 usuários encontrados. Criando usuário admin padrão.')
-            # Cria usuário admin padrão se não houver nenhum usuário
-            admin_email = 'admin@jgminis.com.br'
-            admin_password_hash = hashlib.sha256('admin123'.encode()).hexdigest()
-            c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
-                      ('Admin Padrão', admin_email, admin_password_hash, True))
-            conn.commit()
-            logging.info(f'Usuário admin padrão ({admin_email}) criado com sucesso.')
+            logging.warning('DB inicializado: 0 usuários encontrados. Considere restaurar de um backup JSON.')
         else:
             logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
 
@@ -491,21 +484,6 @@ def reservar(car_id):
                 return render_template('reservar.html', car=car)
 
             conn = get_db_connection()
-            # Verifica disponibilidade do carro para o período
-            conflito = conn.execute('''SELECT id FROM reservas
-                                       WHERE carro_id = ? AND data_reserva = ?
-                                       AND (
-                                           (hora_inicio < ? AND hora_fim > ?) OR
-                                           (hora_inicio < ? AND hora_fim > ?) OR
-                                           (hora_inicio >= ? AND hora_fim <= ?)
-                                       ) AND status != 'cancelada' ''',
-                                    (car_id, data_reserva, hora_fim, hora_inicio, hora_inicio, hora_fim, hora_inicio, hora_fim)).fetchone()
-            
-            if conflito:
-                flash('Carro já reservado para este período.', 'error')
-                conn.close()
-                return render_template('reservar.html', car=car)
-
             conn.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, observacoes) VALUES (?, ?, ?, ?, ?, ?)',
                          (session['user_id'], car_id, data_reserva, hora_inicio, hora_fim, observacoes))
             conn.execute('UPDATE carros SET disponivel = FALSE WHERE id = ?', (car_id,))
@@ -876,9 +854,9 @@ def admin_restore_backup():
                 logging.info(f"DB restaurado: {len(backup_data.get('reservas', []))} reservas, {len(backup_data.get('usuarios', []))} usuários, {len(backup_data.get('carros', []))} carros.")
                 
                 # Sincroniza com Sheets após restauração
+                sync_reservas_to_sheets()
                 sync_usuarios_to_sheets()
                 sync_carros_to_sheets()
-                sync_reservas_to_sheets()
 
             except json.JSONDecodeError:
                 flash('Arquivo de backup inválido: não é um JSON válido.', 'error')
@@ -891,8 +869,16 @@ def admin_restore_backup():
                 logging.error(f'Erro inesperado ao restaurar backup: {e}')
         else:
             flash('Por favor, selecione um arquivo JSON válido.', 'error')
-    
-    return render_template('admin_restore_backup.html') # Você precisaria criar este template
+    return redirect(url_for('admin_panel'))
+
+# --- API Endpoints (Exemplo) ---
+@app.route('/api/carros')
+def api_carros():
+    """Retorna a lista de carros em formato JSON."""
+    carros = get_all_cars()
+    # Converte Row objects para dicionários para serialização JSON
+    carros_dict = [dict(carro) for carro in carros]
+    return jsonify(carros_dict)
 
 # --- Tratamento de Erros ---
 @app.errorhandler(500)
