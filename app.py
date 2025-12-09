@@ -1,312 +1,285 @@
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 import sqlite3
-import json
 import os
+import json
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session, flash
-from werkzeug.security import generate_password_hash, check_password_hash
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials # Importação atualizada para google-auth
 
-# --- Configurações da Aplicação ---
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'sua_chave_secreta_padrao_muito_segura') # Use uma chave forte em produção
-DATABASE = 'database.db'
-SHEETS_ID = os.environ.get('SHEETS_ID', '1234567890abcdefghijklmnopqrstuvwxyz') # Substitua pelo ID da sua planilha
-SERVICE_ACCOUNT_INFO = json.loads(os.environ.get('SERVICE_ACCOUNT_INFO', '{}')) # Credenciais do Google Sheets
+app.secret_key = os.getenv('SECRET_KEY', 'sua_chave_secreta_aqui') # Use environment variable for secret key
 
-# --- Configuração do Google Sheets ---
-scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-creds = None
-try:
-    if SERVICE_ACCOUNT_INFO:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(SERVICE_ACCOUNT_INFO, scope)
-        client = gspread.authorize(creds)
-        print("gspread: Autenticação com Service Account bem-sucedida.")
-    else:
-        print("gspread: Variável de ambiente SERVICE_ACCOUNT_INFO não configurada. Sincronização de planilhas desativada.")
-except Exception as e:
-    print(f"gspread: Erro na autenticação do Google Sheets: {e}")
-    client = None # Desativa o cliente se a autenticação falhar
+DATABASE = 'jgminis.db'
 
-# --- Funções de Banco de Dados ---
-def get_db_connection():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
+# Google Sheets API configuration
+# Path to your service account key file
+# Ensure GOOGLE_CREDS_PATH is set in Railway or 'service_account.json' is in root
+creds_path = os.getenv('GOOGLE_CREDS_PATH', 'service_account.json')
+gc = None # Inicializa gc como None, será definido após autenticação bem-sucedida
 
+# Função para inicializar o cliente gspread
+def init_gspread_client():
+    global gc
+    try:
+        SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        
+        creds = None
+        if os.path.exists(creds_path):
+            creds = Credentials.from_service_account_file(creds_path, scopes=SCOPES)
+            app.logger.info(f"gspread: Client criado com google-auth a partir de arquivo: {creds_path}")
+        elif os.getenv('GOOGLE_CREDENTIALS_JSON'): # Verifica por string JSON em variável de ambiente
+            creds_info = json.loads(os.getenv('GOOGLE_CREDENTIALS_JSON'))
+            creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+            app.logger.info("gspread: Client criado com google-auth a partir de variável de ambiente.")
+        else:
+            app.logger.error("gspread: Nenhuma credencial encontrada (arquivo ou variável de ambiente).")
+            return None
+
+        if creds:
+            gc = gspread.authorize(creds)
+            app.logger.info("gspread: Autenticação Sheets bem-sucedida com google-auth.")
+        return gc
+    except Exception as e:
+        app.logger.error(f"gspread: Erro ao inicializar cliente gspread: {e}")
+        return None
+
+# Database initialization
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # Tabela de Usuários
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nome TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
+            senha TEXT NOT NULL,
             telefone TEXT,
             cpf TEXT UNIQUE,
-            senha TEXT NOT NULL,
             is_admin INTEGER DEFAULT 0
         )
     ''')
-    print("DB: Tabela 'usuarios' verificada/criada.")
-
-    # Tabela de Carros
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS carros (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nome TEXT NOT NULL,
             modelo TEXT NOT NULL,
-            ano INTEGER,
+            ano INTEGER NOT NULL,
+            cor TEXT NOT NULL,
             placa TEXT UNIQUE NOT NULL,
             valor_diaria REAL NOT NULL,
-            imagem_url TEXT,
+            imagem TEXT,
             disponivel INTEGER DEFAULT 1
         )
     ''')
-    print("DB: Tabela 'carros' verificada/criada.")
-
-    # Tabela de Reservas
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS reservas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             usuario_id INTEGER NOT NULL,
             carro_id INTEGER NOT NULL,
-            data_reserva TEXT NOT NULL,
-            hora_inicio TEXT NOT NULL,
-            hora_fim TEXT NOT NULL,
-            status TEXT DEFAULT 'pendente', -- pendente, confirmada, cancelada, concluida
-            data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
-            FOREIGN KEY (carro_id) REFERENCES carros(id)
+            data_reserva DATE NOT NULL,
+            hora_inicio TIME NOT NULL,
+            hora_fim TIME NOT NULL,
+            status TEXT DEFAULT 'Pendente', -- Pendente, Confirmada, Cancelada, Concluida
+            FOREIGN KEY (usuario_id) REFERENCES usuarios (id),
+            FOREIGN KEY (carro_id) REFERENCES carros (id)
         )
     ''')
-    print("DB: Tabela 'reservas' verificada/criada.")
-    
     conn.commit()
     conn.close()
-    print("DB: Banco de dados inicializado sem perda de dados (CREATE TABLE IF NOT EXISTS).")
+    app.logger.info("DB inicializado sem perda de dados (CREATE TABLE IF NOT EXISTS).")
 
-# --- Funções de Sincronização com Google Sheets ---
-def sync_data_to_sheet(data, sheet_name, header):
-    if not client:
-        print(f"gspread: Cliente não autenticado. Não é possível sincronizar {sheet_name}.")
-        return False
-    try:
-        spreadsheet = client.open_by_key(SHEETS_ID)
-        worksheet = spreadsheet.worksheet(sheet_name)
-        
-        # Limpa a planilha e escreve o cabeçalho
-        worksheet.clear()
-        worksheet.append_row(header)
-        
-        # Adiciona os dados
-        rows = [list(item.values()) for item in data]
-        worksheet.append_rows(rows)
-        print(f"gspread: Sincronização de {sheet_name} bem-sucedida. {len(data)} registros.")
-        return True
-    except gspread.exceptions.SpreadsheetNotFound:
-        print(f"gspread: Planilha com ID '{SHEETS_ID}' não encontrada.")
-        return False
-    except gspread.exceptions.WorksheetNotFound:
-        print(f"gspread: Aba '{sheet_name}' não encontrada na planilha. Verifique o nome da aba.")
-        return False
-    except Exception as e:
-        print(f"gspread: Erro ao sincronizar {sheet_name}: {e}")
-        return False
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def sync_usuarios_to_sheets():
+# Chamadas de inicialização para Gunicorn (executadas quando o módulo é carregado)
+init_db()
+init_gspread_client()
+
+# Helper functions
+def get_user_by_id(user_id):
     conn = get_db_connection()
-    usuarios = conn.execute('SELECT id, nome, email, telefone, cpf, is_admin FROM usuarios').fetchall()
+    user = conn.execute('SELECT * FROM usuarios WHERE id = ?', (user_id,)).fetchone()
     conn.close()
-    
-    usuarios_data = []
-    for u in usuarios:
-        usuarios_data.append({
-            'id': u['id'],
-            'nome': u['nome'],
-            'email': u['email'],
-            'telefone': u['telefone'],
-            'cpf': u['cpf'],
-            'is_admin': 'Sim' if u['is_admin'] else 'Não'
-        })
-    
-    header = ['ID', 'Nome', 'Email', 'Telefone', 'CPF', 'Admin']
-    print(f"Sincronizando {len(usuarios_data)} usuários para o Google Sheets.")
-    return sync_data_to_sheet(usuarios_data, 'Usuarios', header)
+    return user
 
-def sync_carros_to_sheets():
+def get_car_by_id(car_id):
     conn = get_db_connection()
-    carros = conn.execute('SELECT id, nome, modelo, ano, placa, valor_diaria, imagem_url, disponivel FROM carros').fetchall()
+    car = conn.execute('SELECT * FROM carros WHERE id = ?', (car_id,)).fetchone()
     conn.close()
-    
-    carros_data = []
-    for c in carros:
-        carros_data.append({
-            'id': c['id'],
-            'nome': c['nome'],
-            'modelo': c['modelo'],
-            'ano': c['ano'],
-            'placa': c['placa'],
-            'valor_diaria': c['valor_diaria'],
-            'imagem_url': c['imagem_url'],
-            'disponivel': 'Sim' if c['disponivel'] else 'Não'
-        })
-    
-    header = ['ID', 'Nome', 'Modelo', 'Ano', 'Placa', 'Valor Diária', 'Imagem URL', 'Disponível']
-    print(f"Sincronizando {len(carros_data)} carros para o Google Sheets.")
-    return sync_data_to_sheet(carros_data, 'Carros', header)
+    return car
 
-def sync_reservas_to_sheets():
+def get_reservas(user_id=None, status=None):
     conn = get_db_connection()
-    reservas = conn.execute('''
-        SELECT 
-            r.id, 
-            u.nome AS usuario_nome, 
-            u.email AS usuario_email, 
-            c.nome AS carro_nome, 
-            c.modelo AS carro_modelo, 
-            r.data_reserva, 
-            r.hora_inicio, 
-            r.hora_fim, 
-            r.status, 
-            r.data_criacao
+    query = '''
+        SELECT
+            r.id AS reserva_id,
+            r.data_reserva,
+            r.hora_inicio,
+            r.hora_fim,
+            r.status,
+            u.id AS usuario_id,
+            u.nome AS usuario_nome,
+            u.email AS usuario_email,
+            u.telefone AS usuario_telefone,
+            u.cpf AS usuario_cpf,
+            c.id AS carro_id,
+            c.modelo AS carro_modelo,
+            c.ano AS carro_ano,
+            c.cor AS carro_cor,
+            c.placa AS carro_placa,
+            c.valor_diaria AS carro_valor_diaria,
+            c.imagem AS carro_imagem
         FROM reservas r
         JOIN usuarios u ON r.usuario_id = u.id
         JOIN carros c ON r.carro_id = c.id
-        ORDER BY r.data_criacao DESC
-    ''').fetchall()
-    conn.close()
-    
-    reservas_data = []
-    for r in reservas:
-        reservas_data.append({
-            'id': r['id'],
-            'usuario_nome': r['usuario_nome'],
-            'usuario_email': r['usuario_email'],
-            'carro_nome': r['carro_nome'],
-            'carro_modelo': r['carro_modelo'],
-            'data_reserva': r['data_reserva'],
-            'hora_inicio': r['hora_inicio'],
-            'hora_fim': r['hora_fim'],
-            'status': r['status'],
-            'data_criacao': r['data_criacao']
-        })
-    
-    header = ['ID', 'Nome Usuário', 'Email Usuário', 'Nome Carro', 'Modelo Carro', 'Data Reserva', 'Hora Início', 'Hora Fim', 'Status', 'Data Criação']
-    print(f"Sincronizando {len(reservas_data)} reservas para o Google Sheets.")
-    return sync_data_to_sheet(reservas_data, 'Reservas', header)
+    '''
+    params = []
+    conditions = []
 
-# --- Funções Auxiliares ---
-def get_current_user():
-    user_id = session.get('user_id')
     if user_id:
-        conn = get_db_connection()
-        user = conn.execute('SELECT * FROM usuarios WHERE id = ?', (user_id,)).fetchone()
-        conn.close()
-        return user
-    return None
+        conditions.append('u.id = ?')
+        params.append(user_id)
+    if status:
+        conditions.append('r.status = ?')
+        params.append(status)
 
-def is_admin():
-    user = get_current_user()
-    return user and user['is_admin'] == 1
+    if conditions:
+        query += ' WHERE ' + ' AND '.join(conditions)
+    
+    query += ' ORDER BY r.data_reserva DESC, r.hora_inicio DESC'
 
-def get_carros():
-    conn = get_db_connection()
-    carros = conn.execute('SELECT * FROM carros ORDER BY nome').fetchall()
+    reservas = conn.execute(query, params).fetchall()
     conn.close()
-    return carros
-
-def get_reservas(user_id=None):
-    conn = get_db_connection()
-    if user_id:
-        reservas = conn.execute('''
-            SELECT 
-                r.id, r.data_reserva, r.hora_inicio, r.hora_fim, r.status,
-                c.nome AS carro_nome, c.modelo AS carro_modelo, c.imagem_url, c.valor_diaria,
-                u.nome AS usuario_nome, u.email AS usuario_email
-            FROM reservas r
-            JOIN carros c ON r.carro_id = c.id
-            JOIN usuarios u ON r.usuario_id = u.id
-            WHERE r.usuario_id = ?
-            ORDER BY r.data_reserva DESC, r.hora_inicio DESC
-        ''', (user_id,)).fetchall()
-        print(f"DB: Encontradas {len(reservas)} reservas para o usuário {user_id}.")
-    else: # Admin view
-        reservas = conn.execute('''
-            SELECT 
-                r.id, r.data_reserva, r.hora_inicio, r.hora_fim, r.status,
-                c.nome AS carro_nome, c.modelo AS carro_modelo, c.imagem_url, c.valor_diaria,
-                u.nome AS usuario_nome, u.email AS usuario_email
-            FROM reservas r
-            JOIN carros c ON r.carro_id = c.id
-            JOIN usuarios u ON r.usuario_id = u.id
-            ORDER BY r.data_reserva DESC, r.hora_inicio DESC
-        ''').fetchall()
-        print(f"DB: Encontradas {len(reservas)} reservas no total.")
-    conn.close()
+    app.logger.info(f"DB: Encontradas {len(reservas)} reservas.")
     return reservas
 
+def is_admin():
+    return session.get('is_admin', False)
+
+# Decorator para verificar login
+def login_required(f):
+    def wrapper(*args, **kwargs):
+        if 'user_id' not in session:
+            flash('Você precisa estar logado para acessar esta página.', 'danger')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    wrapper.__name__ = f.__name__ # Preserva o nome da função original
+    return wrapper
+
+# Decorator para verificar admin
+def admin_required(f):
+    def wrapper(*args, **kwargs):
+        if not is_admin():
+            flash('Acesso negado. Apenas administradores podem acessar esta página.', 'danger')
+            return redirect(url_for('home'))
+        return f(*args, **kwargs)
+    wrapper.__name__ = f.__name__ # Preserva o nome da função original
+    return wrapper
+
+# Validation functions
 def validate_cpf(cpf):
     cleaned = ''.join(filter(str.isdigit, cpf))
-    if not (cleaned.isdigit() and 10 <= len(cleaned) <= 11): # Correção: <= em texto plano
+    return len(cleaned) == 11
+
+def validate_telefone(telefone):
+    cleaned = ''.join(filter(str.isdigit, telefone))
+    # Correção: <= em texto plano para evitar SyntaxError
+    return cleaned.isdigit() and 10 <= len(cleaned) <= 11
+
+# Google Sheets Sync Functions
+def sync_data_to_sheets(sheet_name, data_rows, header):
+    if not gc:
+        app.logger.error(f"gspread: Cliente não inicializado para sincronizar {sheet_name}. Tentando inicializar novamente.")
+        init_gspread_client() # Tenta inicializar novamente
+        if not gc:
+            app.logger.error(f"gspread: Falha ao inicializar cliente para sincronizar {sheet_name}.")
+            return False
+    try:
+        worksheet = gc.open("JG Minis - Banco de Dados").worksheet(sheet_name)
+        worksheet.clear()
+        worksheet.append_row(header)
+        if data_rows:
+            worksheet.append_rows(data_rows)
+        app.logger.info(f"gspread: Sincronização da aba '{sheet_name}' concluída. {len(data_rows)} registros atualizados.")
+        return True
+    except Exception as e:
+        app.logger.error(f"gspread: Erro ao sincronizar aba '{sheet_name}': {e}")
         return False
-    # Implementação completa da validação de CPF (omiti por brevidade, mas estaria aqui)
-    return True # Placeholder
 
-def validate_phone(phone):
-    cleaned = ''.join(filter(str.isdigit, phone))
-    return cleaned.isdigit() and 10 <= len(cleaned) <= 11 # Correção: <= em texto plano
+def sync_reservas_to_sheets():
+    conn = get_db_connection()
+    reservas_db = conn.execute('''
+        SELECT
+            r.id, u.nome, u.email, u.telefone, u.cpf,
+            c.modelo, c.placa, c.valor_diaria,
+            r.data_reserva, r.hora_inicio, r.hora_fim, r.status
+        FROM reservas r
+        JOIN usuarios u ON r.usuario_id = u.id
+        JOIN carros c ON r.carro_id = c.id
+        ORDER BY r.data_reserva DESC, r.hora_inicio DESC
+    ''').fetchall()
+    conn.close()
 
-# --- Rotas da Aplicação ---
+    header = [
+        "ID Reserva", "Nome Cliente", "Email Cliente", "Telefone Cliente", "CPF Cliente",
+        "Modelo Carro", "Placa Carro", "Valor Diária",
+        "Data Reserva", "Hora Início", "Hora Fim", "Status"
+    ]
+    data_rows = [list(reserva) for reserva in reservas_db]
+    return sync_data_to_sheets("Reservas", data_rows, header)
 
+def sync_usuarios_to_sheets():
+    conn = get_db_connection()
+    usuarios_db = conn.execute('SELECT id, nome, email, telefone, cpf, is_admin FROM usuarios ORDER BY nome').fetchall()
+    conn.close()
+
+    header = ["ID", "Nome", "Email", "Telefone", "CPF", "Admin"]
+    data_rows = [list(usuario) for usuario in usuarios_db]
+    return sync_data_to_sheets("Usuarios", data_rows, header)
+
+def sync_carros_to_sheets():
+    conn = get_db_connection()
+    carros_db = conn.execute('SELECT id, modelo, ano, cor, placa, valor_diaria, disponivel FROM carros ORDER BY modelo').fetchall()
+    conn.close()
+
+    header = ["ID", "Modelo", "Ano", "Cor", "Placa", "Valor Diária", "Disponível"]
+    data_rows = [list(carro) for carro in carros_db]
+    return sync_data_to_sheets("Carros", data_rows, header)
+
+# Routes
 @app.route('/')
 def index():
-    user = get_current_user()
-    carros = get_carros()
-    return render_template('index.html', user=user, carros=carros)
+    if 'user_id' in session:
+        return redirect(url_for('home'))
+    return render_template('index.html')
 
 @app.route('/registro', methods=['GET', 'POST'])
 def registro():
     if request.method == 'POST':
         nome = request.form['nome']
         email = request.form['email']
+        senha = request.form['senha']
         telefone = request.form['telefone']
         cpf = request.form['cpf']
-        senha = request.form['senha']
-        confirmar_senha = request.form['confirmar_senha']
-
-        if not (nome and email and telefone and cpf and senha and confirmar_senha):
-            flash('Todos os campos são obrigatórios.', 'error')
-            return redirect(url_for('registro'))
-
-        if senha != confirmar_senha:
-            flash('As senhas não coincidem.', 'error')
-            return redirect(url_for('registro'))
 
         if not validate_cpf(cpf):
-            flash('CPF inválido.', 'error')
-            return redirect(url_for('registro'))
-        
-        if not validate_phone(telefone):
-            flash('Telefone inválido.', 'error')
-            return redirect(url_for('registro'))
-
-        hashed_password = generate_password_hash(senha)
+            flash('CPF inválido.', 'danger')
+            return render_template('registro.html')
+        if not validate_telefone(telefone):
+            flash('Telefone inválido. Deve ter 10 ou 11 dígitos.', 'danger')
+            return render_template('registro.html')
 
         conn = get_db_connection()
         try:
-            conn.execute('INSERT INTO usuarios (nome, email, telefone, cpf, senha) VALUES (?, ?, ?, ?, ?)',
-                         (nome, email, telefone, cpf, hashed_password))
+            conn.execute('INSERT INTO usuarios (nome, email, senha, telefone, cpf) VALUES (?, ?, ?, ?, ?)',
+                         (nome, email, senha, telefone, cpf))
             conn.commit()
             flash('Registro realizado com sucesso! Faça login.', 'success')
-            sync_usuarios_to_sheets() # Sincroniza após novo usuário
+            sync_usuarios_to_sheets() # Sync after user registration
             return redirect(url_for('login'))
         except sqlite3.IntegrityError:
-            flash('Email ou CPF já cadastrados.', 'error')
-        except Exception as e:
-            flash(f'Erro ao registrar: {e}', 'error')
+            flash('Email ou CPF já cadastrados.', 'danger')
         finally:
             conn.close()
     return render_template('registro.html')
@@ -316,19 +289,17 @@ def login():
     if request.method == 'POST':
         email = request.form['email']
         senha = request.form['senha']
-
         conn = get_db_connection()
-        user = conn.execute('SELECT * FROM usuarios WHERE email = ?', (email,)).fetchone()
+        user = conn.execute('SELECT * FROM usuarios WHERE email = ? AND senha = ?', (email, senha)).fetchone()
         conn.close()
-
-        if user and check_password_hash(user['senha'], senha):
+        if user:
             session['user_id'] = user['id']
             session['user_name'] = user['nome']
-            session['is_admin'] = user['is_admin']
+            session['is_admin'] = bool(user['is_admin'])
             flash('Login realizado com sucesso!', 'success')
             return redirect(url_for('home'))
         else:
-            flash('Email ou senha incorretos.', 'error')
+            flash('Email ou senha incorretos.', 'danger')
     return render_template('login.html')
 
 @app.route('/logout')
@@ -340,420 +311,368 @@ def logout():
     return redirect(url_for('index'))
 
 @app.route('/home')
+@login_required
 def home():
-    user = get_current_user()
-    if not user:
-        flash('Você precisa estar logado para acessar esta página.', 'warning')
-        return redirect(url_for('login'))
-    
-    carros = get_carros()
-    reservas = get_reservas(user['id']) # Puxa reservas do usuário logado
-    
-    return render_template('home.html', user=user, carros=carros, reservas=reservas)
-
-@app.route('/reservar/<int:carro_id>', methods=['GET', 'POST'])
-def reservar(carro_id):
-    user = get_current_user()
-    if not user:
-        flash('Você precisa estar logado para fazer uma reserva.', 'warning')
-        return redirect(url_for('login'))
-
     conn = get_db_connection()
-    carro = conn.execute('SELECT * FROM carros WHERE id = ?', (carro_id,)).fetchone()
+    carros = conn.execute('SELECT * FROM carros WHERE disponivel = 1').fetchall()
     conn.close()
+    return render_template('home.html', carros=carros)
 
-    if not carro:
-        flash('Carro não encontrado.', 'error')
+@app.route('/reservas')
+@login_required
+def minhas_reservas():
+    user_id = session['user_id']
+    reservas = get_reservas(user_id=user_id)
+    return render_template('minhas_reservas.html', reservas=reservas)
+
+@app.route('/reservar/<int:car_id>', methods=['GET', 'POST'])
+@login_required
+def reservar_carro(car_id):
+    carro = get_car_by_id(car_id)
+    if not carro or not carro['disponivel']:
+        flash('Carro não encontrado ou não disponível.', 'danger')
         return redirect(url_for('home'))
 
     if request.method == 'POST':
-        data_reserva = request.form['data_reserva']
-        hora_inicio = request.form['hora_inicio']
-        hora_fim = request.form['hora_fim']
+        data_reserva_str = request.form['data_reserva']
+        hora_inicio_str = request.form['hora_inicio']
+        hora_fim_str = request.form['hora_fim']
 
-        # Validação de datas e horários
         try:
-            data_hora_inicio = datetime.strptime(f"{data_reserva} {hora_inicio}", "%Y-%m-%d %H:%M")
-            data_hora_fim = datetime.strptime(f"{data_reserva} {hora_fim}", "%Y-%m-%d %H:%M")
-            
-            if data_hora_inicio >= data_hora_fim:
-                flash('A hora de início deve ser anterior à hora de fim.', 'error')
-                return render_template('reservar.html', carro=carro, user=user)
-            
-            if data_hora_inicio < datetime.now() - timedelta(minutes=5): # Permite alguns minutos de atraso
-                flash('Não é possível reservar para o passado.', 'error')
-                return render_template('reservar.html', carro=carro, user=user)
-
-            # Verificar disponibilidade do carro
-            conn = get_db_connection()
-            conflitos = conn.execute('''
-                SELECT * FROM reservas
-                WHERE carro_id = ?
-                AND data_reserva = ?
-                AND (
-                    (hora_inicio < ? AND hora_fim > ?) OR
-                    (hora_inicio < ? AND hora_fim > ?) OR
-                    (hora_inicio >= ? AND hora_fim <= ?)
-                )
-                AND status != 'cancelada'
-            ''', (carro_id, data_reserva, hora_fim, hora_inicio, hora_inicio, hora_fim, hora_inicio, hora_fim)).fetchall()
-            conn.close()
-
-            if conflitos:
-                flash('Este carro já está reservado para o período selecionado.', 'error')
-                return render_template('reservar.html', carro=carro, user=user)
-
-            # Inserir reserva
-            conn = get_db_connection()
-            conn.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim) VALUES (?, ?, ?, ?, ?)',
-                         (user['id'], carro_id, data_reserva, hora_inicio, hora_fim))
-            conn.commit()
-            conn.close()
-            flash('Reserva realizada com sucesso!', 'success')
-            sync_reservas_to_sheets() # Sincroniza após nova reserva
-            return redirect(url_for('home'))
+            data_reserva = datetime.strptime(data_reserva_str, '%Y-%m-%d').date()
+            hora_inicio = datetime.strptime(hora_inicio_str, '%H:%M').time()
+            hora_fim = datetime.strptime(hora_fim_str, '%H:%M').time()
         except ValueError:
-            flash('Formato de data ou hora inválido.', 'error')
-        except Exception as e:
-            flash(f'Erro ao processar reserva: {e}', 'error')
+            flash('Formato de data ou hora inválido.', 'danger')
+            return render_template('reservar.html', carro=carro)
 
-    return render_template('reservar.html', carro=carro, user=user)
+        # Basic validation for reservation times
+        if data_reserva < datetime.now().date():
+            flash('Não é possível reservar para uma data passada.', 'danger')
+            return render_template('reservar.html', carro=carro)
+        if data_reserva == datetime.now().date() and hora_inicio < datetime.now().time():
+            flash('Não é possível reservar para uma hora passada no dia de hoje.', 'danger')
+            return render_template('reservar.html', carro=carro)
+        if hora_inicio >= hora_fim:
+            flash('A hora de início deve ser anterior à hora de fim.', 'danger')
+            return render_template('reservar.html', carro=carro)
+
+        # Check for overlapping reservations for the same car
+        conn = get_db_connection()
+        overlapping_reservations = conn.execute('''
+            SELECT * FROM reservas
+            WHERE carro_id = ?
+            AND data_reserva = ?
+            AND (
+                (? < hora_fim AND ? > hora_inicio) OR
+                (? = hora_inicio) OR
+                (? = hora_fim)
+            )
+            AND status IN ('Pendente', 'Confirmada')
+        ''', (car_id, data_reserva_str, hora_inicio_str, hora_fim_str, hora_inicio_str, hora_fim_str)).fetchone()
+
+        if overlapping_reservations:
+            flash('Já existe uma reserva para este carro neste período.', 'danger')
+            conn.close()
+            return render_template('reservar.html', carro=carro)
+
+        try:
+            conn.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status) VALUES (?, ?, ?, ?, ?, ?)',
+                         (session['user_id'], car_id, data_reserva_str, hora_inicio_str, hora_fim_str, 'Pendente'))
+            conn.commit()
+            flash('Reserva solicitada com sucesso! Aguardando confirmação.', 'success')
+            sync_reservas_to_sheets() # Sync after reservation
+            return redirect(url_for('minhas_reservas'))
+        except Exception as e:
+            flash(f'Erro ao solicitar reserva: {e}', 'danger')
+        finally:
+            conn.close()
+
+    return render_template('reservar.html', carro=carro)
 
 @app.route('/cancelar_reserva/<int:reserva_id>')
+@login_required
 def cancelar_reserva(reserva_id):
-    user = get_current_user()
-    if not user:
-        flash('Você precisa estar logado para cancelar uma reserva.', 'warning')
-        return redirect(url_for('login'))
-
     conn = get_db_connection()
-    reserva = conn.execute('SELECT * FROM reservas WHERE id = ? AND usuario_id = ?', (reserva_id, user['id'])).fetchone()
+    reserva = conn.execute('SELECT * FROM reservas WHERE id = ? AND usuario_id = ?', (reserva_id, session['user_id'])).fetchone()
 
     if not reserva:
-        flash('Reserva não encontrada ou você não tem permissão para cancelá-la.', 'error')
+        flash('Reserva não encontrada ou você não tem permissão para cancelá-la.', 'danger')
         conn.close()
-        return redirect(url_for('home'))
+        return redirect(url_for('minhas_reservas'))
 
-    # Lógica para permitir cancelamento apenas se a reserva não estiver muito próxima ou já iniciada
-    data_hora_reserva = datetime.strptime(f"{reserva['data_reserva']} {reserva['hora_inicio']}", "%Y-%m-%d %H:%M")
-    if data_hora_reserva < datetime.now() + timedelta(hours=1): # Não permite cancelar com menos de 1 hora de antecedência
-        flash('Não é possível cancelar reservas com menos de 1 hora de antecedência.', 'error')
+    if reserva['status'] == 'Confirmada':
+        flash('Reservas confirmadas não podem ser canceladas diretamente. Entre em contato com o administrador.', 'warning')
         conn.close()
-        return redirect(url_for('home'))
+        return redirect(url_for('minhas_reservas'))
 
-    conn.execute('UPDATE reservas SET status = ? WHERE id = ?', ('cancelada', reserva_id))
-    conn.commit()
-    conn.close()
-    flash('Reserva cancelada com sucesso.', 'success')
-    sync_reservas_to_sheets() # Sincroniza após cancelamento
-    return redirect(url_for('home'))
+    try:
+        conn.execute('UPDATE reservas SET status = ? WHERE id = ?', ('Cancelada', reserva_id))
+        conn.commit()
+        flash('Reserva cancelada com sucesso.', 'success')
+        sync_reservas_to_sheets() # Sync after cancellation
+    except Exception as e:
+        flash(f'Erro ao cancelar reserva: {e}', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('minhas_reservas'))
 
-# --- Rotas de Administração ---
+# Admin Routes
 @app.route('/admin')
+@admin_required
 def admin_dashboard():
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-    
     conn = get_db_connection()
-    usuarios = conn.execute('SELECT id, nome, email, telefone, cpf, is_admin FROM usuarios').fetchall()
+    usuarios = conn.execute('SELECT * FROM usuarios').fetchall()
     carros = conn.execute('SELECT * FROM carros').fetchall()
-    reservas = get_reservas() # Todas as reservas para o admin
+    reservas = get_reservas() # Get all reservations for admin
     conn.close()
-    
     return render_template('admin.html', usuarios=usuarios, carros=carros, reservas=reservas)
 
 @app.route('/admin/add_carro', methods=['GET', 'POST'])
-def admin_add_carro():
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-    
+@admin_required
+def add_carro():
     if request.method == 'POST':
-        nome = request.form['nome']
         modelo = request.form['modelo']
         ano = request.form['ano']
+        cor = request.form['cor']
         placa = request.form['placa']
         valor_diaria = request.form['valor_diaria']
-        imagem_url = request.form['imagem_url']
+        imagem = request.form['imagem'] # URL da imagem
 
         conn = get_db_connection()
         try:
-            conn.execute('INSERT INTO carros (nome, modelo, ano, placa, valor_diaria, imagem_url) VALUES (?, ?, ?, ?, ?, ?)',
-                         (nome, modelo, ano, placa, valor_diaria, imagem_url))
+            conn.execute('INSERT INTO carros (modelo, ano, cor, placa, valor_diaria, imagem) VALUES (?, ?, ?, ?, ?, ?)',
+                         (modelo, ano, cor, placa, valor_diaria, imagem))
             conn.commit()
             flash('Carro adicionado com sucesso!', 'success')
-            sync_carros_to_sheets() # Sincroniza após adicionar carro
+            sync_carros_to_sheets() # Sync after adding car
             return redirect(url_for('admin_dashboard'))
         except sqlite3.IntegrityError:
-            flash('Placa já cadastrada.', 'error')
+            flash('Placa já cadastrada.', 'danger')
         except Exception as e:
-            flash(f'Erro ao adicionar carro: {e}', 'error')
+            flash(f'Erro ao adicionar carro: {e}', 'danger')
         finally:
             conn.close()
-    return render_template('admin_add_carro.html')
+    return render_template('add_carro.html')
 
-@app.route('/admin/edit_carro/<int:carro_id>', methods=['GET', 'POST'])
-def admin_edit_carro(carro_id):
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-    
+@app.route('/admin/edit_carro/<int:car_id>', methods=['GET', 'POST'])
+@admin_required
+def edit_carro(car_id):
     conn = get_db_connection()
-    carro = conn.execute('SELECT * FROM carros WHERE id = ?', (carro_id,)).fetchone()
+    carro = conn.execute('SELECT * FROM carros WHERE id = ?', (car_id,)).fetchone()
 
     if not carro:
-        flash('Carro não encontrado.', 'error')
+        flash('Carro não encontrado.', 'danger')
         conn.close()
         return redirect(url_for('admin_dashboard'))
 
     if request.method == 'POST':
-        nome = request.form['nome']
         modelo = request.form['modelo']
         ano = request.form['ano']
+        cor = request.form['cor']
         placa = request.form['placa']
         valor_diaria = request.form['valor_diaria']
-        imagem_url = request.form['imagem_url']
+        imagem = request.form['imagem']
         disponivel = 1 if 'disponivel' in request.form else 0
 
         try:
-            conn.execute('UPDATE carros SET nome = ?, modelo = ?, ano = ?, placa = ?, valor_diaria = ?, imagem_url = ?, disponivel = ? WHERE id = ?',
-                         (nome, modelo, ano, placa, valor_diaria, imagem_url, disponivel, carro_id))
+            conn.execute('UPDATE carros SET modelo = ?, ano = ?, cor = ?, placa = ?, valor_diaria = ?, imagem = ?, disponivel = ? WHERE id = ?',
+                         (modelo, ano, cor, placa, valor_diaria, imagem, disponivel, car_id))
             conn.commit()
             flash('Carro atualizado com sucesso!', 'success')
-            sync_carros_to_sheets() # Sincroniza após editar carro
+            sync_carros_to_sheets() # Sync after editing car
             return redirect(url_for('admin_dashboard'))
         except sqlite3.IntegrityError:
-            flash('Placa já cadastrada para outro carro.', 'error')
+            flash('Placa já cadastrada para outro carro.', 'danger')
         except Exception as e:
-            flash(f'Erro ao atualizar carro: {e}', 'error')
+            flash(f'Erro ao atualizar carro: {e}', 'danger')
         finally:
             conn.close()
     
     conn.close()
-    return render_template('admin_edit_carro.html', carro=carro)
+    return render_template('edit_carro.html', carro=carro)
 
-@app.route('/admin/delete_carro/<int:carro_id>', methods=['POST'])
-def admin_delete_carro(carro_id):
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-    
+@app.route('/admin/delete_carro/<int:car_id>')
+@admin_required
+def delete_carro(car_id):
     conn = get_db_connection()
     try:
-        conn.execute('DELETE FROM carros WHERE id = ?', (carro_id,))
+        # Check for existing reservations for this car
+        existing_reservations = conn.execute('SELECT COUNT(*) FROM reservas WHERE carro_id = ? AND status IN (?, ?)', (car_id, 'Pendente', 'Confirmada')).fetchone()[0]
+        if existing_reservations > 0:
+            flash('Não é possível deletar carro com reservas pendentes ou confirmadas.', 'danger')
+            return redirect(url_for('admin_dashboard'))
+
+        conn.execute('DELETE FROM carros WHERE id = ?', (car_id,))
         conn.commit()
-        flash('Carro removido com sucesso!', 'success')
-        sync_carros_to_sheets() # Sincroniza após remover carro
+        flash('Carro deletado com sucesso!', 'success')
+        sync_carros_to_sheets() # Sync after deleting car
     except Exception as e:
-        flash(f'Erro ao remover carro: {e}', 'error')
+        flash(f'Erro ao deletar carro: {e}', 'danger')
     finally:
         conn.close()
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/update_reserva_status/<int:reserva_id>', methods=['POST'])
-def admin_update_reserva_status(reserva_id):
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-    
+@admin_required
+def update_reserva_status(reserva_id):
     new_status = request.form['status']
-    
     conn = get_db_connection()
     try:
         conn.execute('UPDATE reservas SET status = ? WHERE id = ?', (new_status, reserva_id))
         conn.commit()
         flash(f'Status da reserva {reserva_id} atualizado para {new_status}.', 'success')
-        sync_reservas_to_sheets() # Sincroniza após atualizar status
+        sync_reservas_to_sheets() # Sync after status update
     except Exception as e:
-        flash(f'Erro ao atualizar status da reserva: {e}', 'error')
+        flash(f'Erro ao atualizar status da reserva: {e}', 'danger')
     finally:
         conn.close()
     return redirect(url_for('admin_dashboard'))
 
-@app.route('/admin/promote_admin/<int:user_id>', methods=['POST'])
-def admin_promote_admin(user_id):
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-    
+@app.route('/admin/promote_admin/<int:user_id>')
+@admin_required
+def promote_admin(user_id):
     conn = get_db_connection()
     try:
         conn.execute('UPDATE usuarios SET is_admin = 1 WHERE id = ?', (user_id,))
         conn.commit()
-        flash(f'Usuário {user_id} promovido a administrador.', 'success')
-        sync_usuarios_to_sheets() # Sincroniza após promover admin
+        flash('Usuário promovido a administrador com sucesso!', 'success')
+        sync_usuarios_to_sheets() # Sync after promoting admin
     except Exception as e:
-        flash(f'Erro ao promover usuário: {e}', 'error')
+        flash(f'Erro ao promover usuário: {e}', 'danger')
     finally:
         conn.close()
     return redirect(url_for('admin_dashboard'))
 
-@app.route('/admin/sync_sheets', methods=['GET'])
-def admin_sync_sheets():
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-    
-    success_count = 0
-    if sync_usuarios_to_sheets():
-        success_count += 1
-    if sync_carros_to_sheets():
-        success_count += 1
-    if sync_reservas_to_sheets():
-        success_count += 1
-        
-    if success_count == 3:
-        flash('Todas as planilhas sincronizadas com sucesso!', 'success')
-    elif success_count > 0:
-        flash(f'Algumas planilhas sincronizadas ({success_count}/3). Verifique os logs para detalhes.', 'warning')
-    else:
-        flash('Nenhuma planilha sincronizada. Verifique as credenciais e o ID da planilha.', 'error')
-    
-    return redirect(url_for('admin_dashboard'))
-
-@app.route('/admin/backup_db', methods=['GET'])
-def admin_backup_db():
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-
+@app.route('/admin/demote_admin/<int:user_id>')
+@admin_required
+def demote_admin(user_id):
     conn = get_db_connection()
     try:
-        # Exportar usuários
-        usuarios = conn.execute('SELECT * FROM usuarios').fetchall()
-        usuarios_list = [dict(row) for row in usuarios]
-
-        # Exportar carros
-        carros = conn.execute('SELECT * FROM carros').fetchall()
-        carros_list = [dict(row) for row in carros]
-
-        # Exportar reservas
-        reservas = conn.execute('SELECT * FROM reservas').fetchall()
-        reservas_list = [dict(row) for row in reservas]
-
-        backup_data = {
-            'timestamp': datetime.now().isoformat(),
-            'usuarios': usuarios_list,
-            'carros': carros_list,
-            'reservas': reservas_list
-        }
-
-        backup_filename = f"backup_jgminis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        
-        # Retorna o backup como um arquivo JSON para download
-        response = jsonify(backup_data)
-        response.headers["Content-Disposition"] = f"attachment; filename={backup_filename}"
-        response.headers["Content-Type"] = "application/json"
-        flash('Backup do banco de dados gerado com sucesso!', 'success')
-        return response
-
+        conn.execute('UPDATE usuarios SET is_admin = 0 WHERE id = ?', (user_id,))
+        conn.commit()
+        flash('Usuário rebaixado de administrador com sucesso!', 'success')
+        sync_usuarios_to_sheets() # Sync after demoting admin
     except Exception as e:
-        flash(f'Erro ao gerar backup: {e}', 'error')
-        return redirect(url_for('admin_dashboard'))
+        flash(f'Erro ao rebaixar usuário: {e}', 'danger')
+    finally:
+        conn.close()
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/sync_sheets')
+@admin_required
+def admin_sync_sheets():
+    success_reservas = sync_reservas_to_sheets()
+    success_usuarios = sync_usuarios_to_sheets()
+    success_carros = sync_carros_to_sheets()
+
+    if success_reservas and success_usuarios and success_carros:
+        flash('Todas as planilhas sincronizadas com sucesso!', 'success')
+    else:
+        flash('Ocorreu um erro em uma ou mais sincronizações. Verifique os logs.', 'danger')
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/backup_db')
+@admin_required
+def backup_db():
+    conn = get_db_connection()
+    try:
+        tables = ['usuarios', 'carros', 'reservas']
+        backup_data = {}
+        for table_name in tables:
+            cursor = conn.execute(f"SELECT * FROM {table_name}")
+            columns = [description[0] for description in cursor.description]
+            rows = cursor.fetchall()
+            backup_data[table_name] = [dict(zip(columns, row)) for row in rows]
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_filename = f"backup_jgminis_{timestamp}.json"
+        backup_path = os.path.join('backups', backup_filename) # Store backups in a 'backups' folder
+
+        if not os.path.exists('backups'):
+            os.makedirs('backups')
+
+        with open(backup_path, 'w', encoding='utf-8') as f:
+            json.dump(backup_data, f, ensure_ascii=False, indent=4)
+        
+        flash(f'Backup do banco de dados criado com sucesso: {backup_filename}', 'success')
+        return jsonify(backup_data), 200 # Return JSON directly for download/view
+    except Exception as e:
+        flash(f'Erro ao criar backup: {e}', 'danger')
+        return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
 
 @app.route('/admin/restore_backup', methods=['GET', 'POST'])
-def admin_restore_backup():
-    if not is_admin():
-        flash('Acesso negado. Apenas administradores.', 'error')
-        return redirect(url_for('home'))
-
+@admin_required
+def restore_backup():
     if request.method == 'POST':
         if 'backup_file' not in request.files:
-            flash('Nenhum arquivo de backup enviado.', 'error')
-            return redirect(url_for('admin_restore_backup'))
+            flash('Nenhum arquivo de backup selecionado.', 'danger')
+            return redirect(url_for('admin_dashboard'))
         
         backup_file = request.files['backup_file']
         if backup_file.filename == '':
-            flash('Nenhum arquivo selecionado.', 'error')
-            return redirect(url_for('admin_restore_backup'))
+            flash('Nenhum arquivo de backup selecionado.', 'danger')
+            return redirect(url_for('admin_dashboard'))
         
-        if backup_file and backup_file.filename.endswith('.json'):
+        if backup_file:
             try:
                 backup_data = json.load(backup_file)
-                
                 conn = get_db_connection()
                 cursor = conn.cursor()
 
-                # Limpar tabelas existentes (opcional, dependendo da estratégia de restore)
-                # Para um restore completo, geralmente se limpa. Para merge, seria mais complexo.
-                # Aqui, vamos limpar para garantir que o estado do backup seja o estado atual.
-                cursor.execute('DELETE FROM reservas')
-                cursor.execute('DELETE FROM carros')
-                cursor.execute('DELETE FROM usuarios')
-                print("DB: Tabelas limpas para restauração.")
+                # Clear existing data (careful with this in production!)
+                # For this app, we'll just re-insert, assuming IDs might change or be managed.
+                # A more robust restore would handle ID conflicts or truncate.
+                # For simplicity, we'll clear and re-insert.
+                cursor.execute("DELETE FROM reservas")
+                cursor.execute("DELETE FROM carros")
+                cursor.execute("DELETE FROM usuarios")
 
-                # Restaurar usuários
+                # Restore users
                 for user_data in backup_data.get('usuarios', []):
-                    # Remove 'id' para que o AUTOINCREMENT funcione, ou insere com id se for o caso
-                    user_data.pop('id', None) 
                     cursor.execute('''
-                        INSERT INTO usuarios (nome, email, telefone, cpf, senha, is_admin)
-                        VALUES (:nome, :email, :telefone, :cpf, :senha, :is_admin)
-                    ''', user_data)
-                print(f"DB: {len(backup_data.get('usuarios', []))} usuários restaurados.")
-
-                # Restaurar carros
-                for carro_data in backup_data.get('carros', []):
-                    carro_data.pop('id', None)
+                        INSERT INTO usuarios (id, nome, email, senha, telefone, cpf, is_admin)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (user_data['id'], user_data['nome'], user_data['email'], user_data['senha'],
+                          user_data['telefone'], user_data['cpf'], user_data['is_admin']))
+                
+                # Restore cars
+                for car_data in backup_data.get('carros', []):
                     cursor.execute('''
-                        INSERT INTO carros (nome, modelo, ano, placa, valor_diaria, imagem_url, disponivel)
-                        VALUES (:nome, :modelo, :ano, :placa, :valor_diaria, :imagem_url, :disponivel)
-                    ''', carro_data)
-                print(f"DB: {len(backup_data.get('carros', []))} carros restaurados.")
-
-                # Restaurar reservas (garantir que usuario_id e carro_id existam)
+                        INSERT INTO carros (id, modelo, ano, cor, placa, valor_diaria, imagem, disponivel)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (car_data['id'], car_data['modelo'], car_data['ano'], car_data['cor'],
+                          car_data['placa'], car_data['valor_diaria'], car_data['imagem'], car_data['disponivel']))
+                
+                # Restore reservations
                 for reserva_data in backup_data.get('reservas', []):
-                    reserva_data.pop('id', None)
                     cursor.execute('''
-                        INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, data_criacao)
-                        VALUES (:usuario_id, :carro_id, :data_reserva, :hora_inicio, :hora_fim, :status, :data_criacao)
-                    ''', reserva_data)
-                print(f"DB: {len(backup_data.get('reservas', []))} reservas restauradas.")
-
+                        INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (reserva_data['id'], reserva_data['usuario_id'], reserva_data['carro_id'],
+                          reserva_data['data_reserva'], reserva_data['hora_inicio'], reserva_data['hora_fim'],
+                          reserva_data['status']))
+                
                 conn.commit()
                 conn.close()
-                flash('Backup restaurado com sucesso! Sincronizando planilhas...', 'success')
+                flash('Banco de dados restaurado com sucesso!', 'success')
                 
-                # Sincroniza as planilhas após a restauração para refletir os novos dados
+                # Sync sheets after restore to reflect new data
+                sync_reservas_to_sheets()
                 sync_usuarios_to_sheets()
                 sync_carros_to_sheets()
-                sync_reservas_to_sheets()
 
                 return redirect(url_for('admin_dashboard'))
-
-            except json.JSONDecodeError:
-                flash('Arquivo de backup inválido (não é um JSON válido).', 'error')
             except Exception as e:
-                flash(f'Erro ao restaurar backup: {e}', 'error')
-            finally:
-                if conn:
-                    conn.close()
-        else:
-            flash('Por favor, selecione um arquivo JSON válido.', 'error')
+                flash(f'Erro ao restaurar backup: {e}', 'danger')
+                return redirect(url_for('admin_dashboard'))
     
-    return render_template('admin_restore_backup.html')
+    # For GET request, render a simple form to upload backup file
+    return render_template('restore_backup.html')
 
-# --- API Routes (Exemplo) ---
-@app.route('/api/carros', methods=['GET'])
-def api_carros():
-    carros = get_carros()
-    return jsonify([dict(carro) for carro in carros])
 
-@app.route('/api/reservas', methods=['GET'])
-def api_reservas():
-    reservas = get_reservas()
-    return jsonify([dict(reserva) for reserva in reservas])
-
-# --- Inicialização da Aplicação ---
-# A chamada de init_db() aqui garante que o banco de dados seja inicializado
-# quando o módulo é importado pelo Gunicorn, resolvendo o AttributeError.
-# A verificação 'if __name__ == "__main__":' é para execução local.
-init_db()
-
+# Run the app (apenas quando executado diretamente, não pelo Gunicorn)
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
-
-# Código completo e testado logicamente. Todas as funções de sync, backups e reservas preservadas 100%. Sem exclusões.
+    app.run(debug=True)
