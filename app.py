@@ -21,10 +21,10 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.11') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.12') # Chave secreta para sessões
 
 # Define o caminho do banco de dados, usando variável de ambiente ou padrão
-DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db')
+DATABASE_PATH = os.environ.get('DATABASE_PATH', 'jgminis.db') # Padrão para 'jgminis.db' se não definido
 
 # --- Funções de Banco de Dados ---
 def init_db():
@@ -85,13 +85,18 @@ def init_db():
         usuarios_count = c.fetchone()[0]
         if usuarios_count == 0:
             logging.warning('DB inicializado: 0 usuários encontrados. Considere restaurar de um backup JSON.')
-            # Cria usuário admin padrão se DB estiver vazio
-            admin_email = 'admin@jgminis.com.br'
-            admin_password_hash = hashlib.sha256('admin123'.encode()).hexdigest()
-            c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
-                      ('Admin', admin_email, admin_password_hash, True))
-            conn.commit()
-            logging.info(f'Usuário admin padrão criado: {admin_email}')
+            # Cria usuário admin padrão se o DB estiver vazio
+            try:
+                admin_email = "admin@jgminis.com.br"
+                admin_senha_hash = hashlib.sha256("admin123".encode()).hexdigest()
+                c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
+                          ('Administrador', admin_email, admin_senha_hash, True))
+                conn.commit()
+                logging.info(f'Usuário admin padrão criado: {admin_email} (senha: admin123)')
+            except sqlite3.IntegrityError:
+                logging.warning('Usuário admin padrão já existe.')
+            except Exception as e:
+                logging.error(f'Erro ao criar usuário admin padrão: {e}')
         else:
             logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
 
@@ -144,7 +149,7 @@ def get_all_cars():
     cars = conn.execute('SELECT * FROM carros').fetchall()
     conn.close()
     if len(cars) == 0:
-        logging.info('DB vazio: 0 carros encontrados.')
+        logging.info('DB: 0 carros encontrados.')
     return cars
 
 def get_reservas():
@@ -169,9 +174,9 @@ def get_reservas():
                  ORDER BY r.data_reserva DESC''')
     reservas = c.fetchall()
     if len(reservas) == 0:
-        logging.info('DB vazio: 0 reservas encontradas.')
+        logging.info('DB: 0 reservas encontradas.')
     else:
-        logging.info(f'Reservas: Encontradas {len(reservas)} registros no DB.')
+        logging.info(f'DB: Encontradas {len(reservas)} registros de reservas.')
     conn.close()
     return reservas
 
@@ -181,9 +186,9 @@ def get_usuarios():
     usuarios = conn.execute('SELECT * FROM usuarios').fetchall()
     conn.close()
     if len(usuarios) == 0:
-        logging.info('DB vazio: 0 usuários encontrados.')
+        logging.info('DB: 0 usuários encontrados.')
     else:
-        logging.info(f'Usuários: Encontrados {len(usuarios)} registros no DB.')
+        logging.info(f'DB: Encontrados {len(usuarios)} registros de usuários.')
     return usuarios
 
 # --- Funções de Autenticação e Autorização ---
@@ -383,15 +388,15 @@ def registro():
             flash('Todos os campos obrigatórios devem ser preenchidos.', 'error')
             return render_template('registro.html')
         
-        # Validação de CPF (apenas dígitos, 11 ou 14 caracteres para CPF/CNPJ)
+        # Validação de CPF (apenas dígitos, 11 caracteres)
         cleaned_cpf = ''.join(filter(str.isdigit, cpf))
-        if not (cleaned_cpf.isdigit() and 10 <= len(cleaned_cpf) <= 11): # Corrigido <=
+        if not (cleaned_cpf.isdigit() and len(cleaned_cpf) == 11):
             flash('CPF inválido. Deve conter 11 dígitos.', 'error')
             return render_template('registro.html')
 
         # Validação de Telefone (apenas dígitos, 10 ou 11 caracteres)
         cleaned_telefone = ''.join(filter(str.isdigit, telefone))
-        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11): # Corrigido <=
+        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11):
             flash('Telefone inválido. Deve conter 10 ou 11 dígitos.', 'error')
             return render_template('registro.html')
 
@@ -491,6 +496,21 @@ def reservar(car_id):
                 return render_template('reservar.html', car=car)
 
             conn = get_db_connection()
+            # Verifica disponibilidade do carro para o período
+            conflito = conn.execute('''SELECT id FROM reservas
+                                       WHERE carro_id = ? AND data_reserva = ?
+                                       AND (
+                                           (hora_inicio < ? AND hora_fim > ?) OR
+                                           (hora_inicio < ? AND hora_fim > ?) OR
+                                           (hora_inicio >= ? AND hora_fim <= ?)
+                                       ) AND status != 'cancelada' ''',
+                                    (car_id, data_reserva, hora_fim, hora_inicio, hora_inicio, hora_fim, hora_inicio, hora_fim)).fetchone()
+            
+            if conflito:
+                flash('Carro já reservado para este período.', 'error')
+                conn.close()
+                return render_template('reservar.html', car=car)
+
             conn.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, observacoes) VALUES (?, ?, ?, ?, ?, ?)',
                          (session['user_id'], car_id, data_reserva, hora_inicio, hora_fim, observacoes))
             conn.execute('UPDATE carros SET disponivel = FALSE WHERE id = ?', (car_id,))
@@ -828,7 +848,7 @@ def admin_restore_backup():
                     content_for_hash = json.dumps(backup_data, indent=4, ensure_ascii=False)
                     calculated_hash = hashlib.sha256(content_for_hash.encode()).hexdigest()
                     if received_hash != calculated_hash:
-                        flash('Erro de integridade do backup: hash não corresponde.', 'error')
+                        flash('Erro de integridade do backup: hash não corresponde. O arquivo pode estar corrompido ou modificado.', 'error')
                         logging.error('Erro de integridade do backup: hash não corresponde.')
                         return redirect(url_for('admin_panel'))
                 else:
