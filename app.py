@@ -402,13 +402,13 @@ def registro():
         
         # Validação de CPF (apenas dígitos, 11 caracteres)
         cleaned_cpf = ''.join(filter(str.isdigit, cpf))
-        if not (cleaned_cpf.isdigit() and 11 <= len(cleaned_cpf) <= 11):  # Corrigido: <= correto
+        if not (cleaned_cpf.isdigit() and len(cleaned_cpf) == 11): # Corrigido: == 11 para 11 dígitos exatos
             flash('CPF inválido. Deve conter 11 dígitos.', 'error')
             return render_template('registro.html')
 
         # Validação de Telefone (apenas dígitos, 10 ou 11 caracteres)
         cleaned_telefone = ''.join(filter(str.isdigit, telefone))
-        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11):  # Corrigido: <= correto
+        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11): # Corrigido: <= correto
             flash('Telefone inválido. Deve conter 10 ou 11 dígitos.', 'error')
             return render_template('registro.html')
 
@@ -726,7 +726,7 @@ def admin_update_reserva_status(reserva_id, status):
         conn.execute('UPDATE reservas SET status = ? WHERE id = ?', (status, reserva_id))
         conn.commit()
         flash(f'Status da reserva {reserva_id} atualizado para "{status}" com sucesso!', 'success')
-        logging.info(f'Reserva {reserva_id} status atualizado para: {status}')
+        logging.info(f'Status da reserva {reserva_id} atualizado para: {status}')
         sync_reservas_to_sheets() # Sincroniza após atualizar status
     except Exception as e:
         flash(f'Erro ao atualizar status da reserva: {e}', 'error')
@@ -849,6 +849,7 @@ def admin_restore_backup():
                 # Verifica integridade do hash
                 received_hash = backup_data.pop('hash', None)
                 if received_hash:
+                    # Recalcula o hash do conteúdo sem o hash original para comparação
                     calculated_hash = hashlib.sha256(json.dumps(backup_data, indent=4, ensure_ascii=False).encode()).hexdigest()
                     if received_hash != calculated_hash:
                         flash('Erro de integridade do backup: hash não corresponde.', 'error')
@@ -875,6 +876,51 @@ def admin_restore_backup():
                     c.execute('INSERT INTO usuarios (id, nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                               (user_data['id'], user_data['nome'], user_data['email'], user_data['senha_hash'], user_data['cpf'], user_data['telefone'], user_data['data_cadastro'], user_data['is_admin']))
                 
-                # Restaura reservas
+                # Restaura reservas (CORRIGIDO: string SQL completa)
                 for reserva_data in backup_data.get('reservas', []):
-                    c.execute('INSERT INTO reservas (id
+                    c.execute('INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                              (reserva_data['id'], reserva_data['usuario_id'], reserva_data['carro_id'], reserva_data['data_reserva'], reserva_data['hora_inicio'], reserva_data['hora_fim'], reserva_data['status'], reserva_data['observacoes']))
+                
+                conn.commit()
+                flash('Backup restaurado com sucesso!', 'success')
+                logging.info('Backup restaurado com sucesso.')
+                # Re-inicializa o gspread client para garantir que as planilhas reflitam os dados restaurados
+                sync_reservas_to_sheets()
+                sync_usuarios_to_sheets()
+                sync_carros_to_sheets()
+
+            except json.JSONDecodeError:
+                flash('Arquivo de backup inválido: não é um JSON válido.', 'error')
+                logging.error('Erro: Arquivo de backup inválido (JSONDecodeError).')
+            except KeyError as ke:
+                flash(f'Arquivo de backup inválido: chave ausente - {ke}.', 'error')
+                logging.error(f'Erro: Arquivo de backup inválido (KeyError: {ke}).')
+            except Exception as e:
+                flash(f'Erro ao restaurar backup: {e}', 'error')
+                logging.error(f'Erro ao restaurar backup: {e}')
+            finally:
+                conn.close()
+        else:
+            flash('Por favor, selecione um arquivo JSON válido.', 'error')
+    return render_template('admin_restore_backup.html') # Você precisará de um template para esta rota
+
+# --- Tratamento de Erros ---
+@app.errorhandler(404)
+def page_not_found(e):
+    """Trata erros 404 (Página não encontrada)."""
+    logging.warning(f"404 Not Found: {request.url}")
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    """Trata erros 500 (Erro interno do servidor)."""
+    logging.error(f"500 Internal Server Error: {e}", exc_info=True)
+    flash('Ocorreu um erro inesperado no servidor. Por favor, tente novamente mais tarde.', 'error')
+    return render_template('500.html'), 500
+
+# O Gunicorn (servidor de produção) irá chamar a instância 'app' diretamente.
+# Não precisamos do bloco if __name__ == '__main__': app.run() para deploy.
+# Apenas um 'pass' para manter a estrutura se o arquivo for executado diretamente,
+# mas o Gunicorn não o usará.
+if __name__ == '__main__':
+    pass
