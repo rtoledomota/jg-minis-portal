@@ -1,37 +1,54 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, send_file
-import sqlite3
-import json
-from datetime import datetime, timedelta
 import os
+import re
+import json
+import csv
+import io
 import logging
+from datetime import datetime, timedelta
+from flask import Flask, request, session, redirect, url_for, render_template_string, flash, send_file, abort, make_response, render_template, jsonify
+from werkzeug.security import generate_password_hash, check_password_hash
+import sqlite3
+import hashlib # Para hash de senhas e verificação de backup
 from io import BytesIO
-import hashlib
 
-# Configuração de logging
+# --- 1. Configure Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Tenta importar google-auth e gspread, com fallback para erro se não estiver disponível
+# --- 2. Flask App Initialization ---
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'a_very_secret_key_for_jg_minis_v4_3_9_production_stable')
+
+# --- 3. Environment Variables ---
+LOGO_URL = os.environ.get('LOGO_URL', 'https://i.imgur.com/Yp1OiWB.jpeg')
+WHATSAPP_NUMBER = os.environ.get('WHATSAPP_NUMBER', '5511949094290')  # Just numbers, no + or spaces
+DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db') # CRÍTICO: Usar /tmp para persistência no Railway
+GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', 'SUA_SHEET_ID_AQUI') # ID da sua planilha
+
+# Fallback for gspread - use only if available
+GSPREAD_AVAILABLE = False
+gc = None
+sheet = None
 try:
-    from google.oauth2.service_account import Credentials
     import gspread
-    logging.info('gspread: google-auth e gspread importados com sucesso.')
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+    logging.info('google-auth e gspread importados com sucesso.')
 except ImportError:
-    logging.error('gspread: As bibliotecas google-auth ou gspread não foram encontradas. As funcionalidades de sincronização com Google Sheets não estarão disponíveis.')
+    logging.error('Erro: As bibliotecas google-auth ou gspread não foram encontradas. As funcionalidades de sincronização com Google Sheets não estarão disponíveis.')
     Credentials = None
     gspread = None
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.9') # Chave secreta para sessões
+# --- 4. Database Helper Functions (Preservation Guaranteed) ---
+def get_db_connection():
+    conn = sqlite3.connect(DATABASE_PATH) # Usar o caminho persistente
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# --- Funções de Banco de Dados ---
 def init_db():
-    """Inicializa o banco de dados SQLite, criando tabelas se não existirem."""
-    conn = None
+    conn = get_db_connection()
+    c = conn.cursor()
     try:
-        conn = sqlite3.connect('jgminis.db')
-        c = conn.cursor()
-
-        # Tabela de Usuários
+        # Users table - IF NOT EXISTS preserves existing data
         c.execute('''CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nome TEXT NOT NULL,
@@ -43,7 +60,7 @@ def init_db():
             is_admin BOOLEAN DEFAULT FALSE
         )''')
 
-        # Tabela de Carros
+        # Carros table - IF NOT EXISTS preserves existing data
         c.execute('''CREATE TABLE IF NOT EXISTS carros (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             modelo TEXT NOT NULL,
@@ -54,7 +71,7 @@ def init_db():
             preco_diaria REAL NOT NULL
         )''')
 
-        # Tabela de Reservas
+        # Reservations table - IF NOT EXISTS preserves existing data
         c.execute('''CREATE TABLE IF NOT EXISTS reservas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             usuario_id INTEGER,
@@ -68,211 +85,183 @@ def init_db():
             FOREIGN KEY (carro_id) REFERENCES carros (id)
         )''')
 
-        conn.commit()
+        # Create admin user ONLY if not exists (preserves existing admins)
+        c.execute('SELECT id FROM usuarios WHERE email = ?', ('admin@jgminis.com.br',))
+        if not c.fetchone():
+            hashed_pw = hashlib.sha256('admin123'.encode()).hexdigest()
+            c.execute('INSERT INTO usuarios (nome, email, senha_hash, telefone, is_admin) VALUES (?, ?, ?, ?, ?)',
+                      ('Admin', 'admin@jgminis.com.br', hashed_pw, '11999999999', True))
+            logging.info('Usuário admin criado no DB (primeira vez)')
 
         # Verifica contagens existentes para logs
         c.execute('SELECT COUNT(*) FROM reservas')
         reservas_count = c.fetchone()[0]
-        if reservas_count == 0:
-            logging.warning('DB inicializado: 0 reservas encontradas. Considere restaurar de um backup JSON.')
-        else:
-            logging.info(f'DB inicializado: {reservas_count} reservas preservadas.')
+        logging.info(f'DB inicializado: {reservas_count} reservas preservadas.')
 
         c.execute('SELECT COUNT(*) FROM usuarios')
         usuarios_count = c.fetchone()[0]
-        if usuarios_count == 0:
-            logging.warning('DB inicializado: 0 usuários encontrados. Considere restaurar de um backup JSON.')
-        else:
-            logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
+        logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
 
         c.execute('SELECT COUNT(*) FROM carros')
         carros_count = c.fetchone()[0]
-        if carros_count == 0:
-            logging.warning('DB inicializado: 0 carros encontrados. Adicione carros ou restaure de um backup JSON.')
-        else:
-            logging.info(f'DB inicializado: {carros_count} carros preservados.')
+        logging.info(f'DB inicializado: {carros_count} carros preservados.')
 
-    except sqlite3.Error as e:
-        logging.error(f"Erro ao inicializar o banco de dados: {e}")
+        conn.commit()
+        logging.info('DB inicializado sem perda de dados - tabelas preservadas')
+    except Exception as e:
+        logging.error(f'Erro no init_db: {e}')
+        conn.rollback()
     finally:
-        if conn:
-            conn.close()
+        conn.close()
 
 # Inicializa o DB no nível do módulo para garantir que esteja pronto para Gunicorn
 init_db()
 
-def get_db_connection():
-    """Retorna uma conexão com o banco de dados."""
-    conn = sqlite3.connect('jgminis.db')
-    conn.row_factory = sqlite3.Row # Permite acessar colunas por nome
-    return conn
+# --- 5. Validation Functions ---
+def is_valid_email(email):
+    pattern = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+    return re.match(pattern, email) is not None
 
+def is_valid_phone(phone):
+    cleaned = re.sub(r'[^\d]', '', phone)  # Remove non-digits
+    return cleaned.isdigit() and 10 <= len(cleaned) <= 11
+
+def is_valid_cpf(cpf):
+    cleaned = ''.join(filter(str.isdigit, cpf))
+    return cleaned.isdigit() and len(cleaned) == 11
+
+# --- 6. User/Car/Reservation Getters ---
 def get_user_by_id(user_id):
-    """Busca um usuário pelo ID."""
     conn = get_db_connection()
     user = conn.execute('SELECT * FROM usuarios WHERE id = ?', (user_id,)).fetchone()
     conn.close()
     return user
 
 def get_user_by_email(email):
-    """Busca um usuário pelo email."""
     conn = get_db_connection()
     user = conn.execute('SELECT * FROM usuarios WHERE email = ?', (email,)).fetchone()
     conn.close()
     return user
 
 def get_car_by_id(car_id):
-    """Busca um carro pelo ID."""
     conn = get_db_connection()
     car = conn.execute('SELECT * FROM carros WHERE id = ?', (car_id,)).fetchone()
     conn.close()
     return car
 
 def get_all_cars():
-    """Busca todos os carros."""
     conn = get_db_connection()
     cars = conn.execute('SELECT * FROM carros').fetchall()
     conn.close()
-    if len(cars) == 0:
-        logging.info('DB vazio: 0 carros encontrados.')
     return cars
 
 def get_reservas():
-    """Busca todas as reservas com detalhes de usuário e carro."""
     conn = get_db_connection()
     c = conn.cursor()
-    # Seleciona colunas explicitamente na ordem para facilitar o mapeamento para Sheets
-    c.execute('''SELECT 
-                    r.id, 
-                    u.nome as usuario_nome, 
-                    c.modelo as carro_modelo, 
-                    r.data_reserva, 
-                    r.hora_inicio, 
-                    r.hora_fim, 
+    c.execute('''SELECT
+                    r.id,
+                    u.nome as usuario_nome,
+                    c.modelo as carro_modelo,
+                    r.data_reserva,
+                    r.hora_inicio,
+                    r.hora_fim,
                     r.status,
                     r.usuario_id,
                     r.carro_id,
                     r.observacoes
-                 FROM reservas r 
-                 JOIN usuarios u ON r.usuario_id = u.id 
-                 JOIN carros c ON r.carro_id = c.id 
+                 FROM reservas r
+                 JOIN usuarios u ON r.usuario_id = u.id
+                 JOIN carros c ON r.carro_id = c.id
                  ORDER BY r.data_reserva DESC''')
     reservas = c.fetchall()
-    if len(reservas) == 0:
-        logging.info('DB vazio: 0 reservas encontradas.')
-    else:
-        logging.info(f'Reservas: Encontradas {len(reservas)} registros no DB.')
+    logging.info(f'Reservas: Encontradas {len(reservas)} registros no DB.')
     conn.close()
     return reservas
 
 def get_usuarios():
-    """Busca todos os usuários."""
     conn = get_db_connection()
     usuarios = conn.execute('SELECT * FROM usuarios').fetchall()
     conn.close()
-    if len(usuarios) == 0:
-        logging.info('DB vazio: 0 usuários encontrados.')
-    else:
-        logging.info(f'Usuários: Encontrados {len(usuarios)} registros no DB.')
+    logging.info(f'Usuários: Encontrados {len(usuarios)} registros no DB.')
     return usuarios
 
-# --- Funções de Autenticação e Autorização ---
+# --- 7. Authentication and Authorization ---
 def is_admin():
-    """Verifica se o usuário logado é administrador."""
     if 'user_id' in session:
         user = get_user_by_id(session['user_id'])
         return user and user['is_admin']
     return False
 
-# --- Funções de Integração com Google Sheets (gspread) ---
+# --- 8. Google Sheets Integration (gspread) ---
 gspread_client = None
 
 def init_gspread_client():
-    """Inicializa o cliente gspread para acesso às planilhas."""
     global gspread_client
     if gspread_client:
-        return gspread_client # Retorna cliente existente se já inicializado
+        return gspread_client
 
-    if not gspread or not Credentials:
-        logging.warning('gspread: Bibliotecas gspread ou google-auth não disponíveis. Sincronização com Sheets desativada.')
+    if not GSPREAD_AVAILABLE:
+        logging.warning('gspread ou google-auth não disponíveis. Sincronização com Sheets desativada.')
         return None
 
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        
-        # Tenta carregar credenciais da variável de ambiente (recomendado no Railway)
+
         if os.environ.get('GOOGLE_CREDENTIALS_JSON'):
             creds_dict = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
             logging.info('gspread: Credenciais carregadas da variável de ambiente.')
-        # Fallback para arquivo service_account.json
         elif os.path.exists('service_account.json'):
             creds = Credentials.from_service_account_file('service_account.json', scopes=scope)
             logging.info('gspread: Credenciais carregadas do arquivo service_account.json.')
         else:
-            logging.error('gspread: Nenhuma credencial encontrada (variável de ambiente ou arquivo). Sincronização com Sheets desativada.')
+            logging.error('gspread: Nenhuma credencial encontrada (variável de ambiente ou arquivo).')
             return None
-            
+
         gspread_client = gspread.authorize(creds)
         logging.info('gspread: Autenticação bem-sucedida.')
         return gspread_client
     except Exception as e:
-        logging.error(f'gspread: Erro na autenticação gspread: {e}. Sincronização com Sheets desativada.')
+        logging.error(f'Erro na autenticação gspread: {e}')
         return None
 
 # Inicializa o cliente gspread no nível do módulo
 gspread_client = init_gspread_client()
 
-# Substitua 'SUA_SHEET_ID' pela ID real da sua planilha do Google Sheets
-GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', 'SUA_SHEET_ID_AQUI') 
-
 def sync_reservas_to_sheets():
-    """Sincroniza as reservas do DB para a aba 'Reservas' do Google Sheets."""
     if not gspread_client:
-        logging.warning('Sync reservas pulado: Cliente gspread não inicializado ou credenciais ausentes.')
-        return
-
-    if GOOGLE_SHEET_ID == 'SUA_SHEET_ID_AQUI':
-        logging.warning('Sync reservas pulado: GOOGLE_SHEET_ID não configurado. Por favor, defina a variável de ambiente.')
+        logging.error('Sync reservas falhou: Cliente gspread não inicializado.')
         return
 
     try:
         sheet = gspread_client.open_by_key(GOOGLE_SHEET_ID).worksheet('Reservas')
-        sheet.clear() # Limpa a aba existente
+        sheet.clear()
 
         reservas = get_reservas()
         if reservas:
-            # Cabeçalhos na ordem desejada
             headers = ['ID', 'Usuário', 'Carro', 'Data', 'Hora Início', 'Hora Fim', 'Status']
-            # Mapeia os dados da tupla para a ordem dos cabeçalhos
             data_to_append = [
                 [
-                    str(r['id']),  # r.id
-                    str(r['usuario_nome']),  # u.nome
-                    str(r['carro_modelo']),  # c.modelo
-                    str(r['data_reserva']),  # r.data_reserva
-                    str(r['hora_inicio']),  # r.hora_inicio
-                    str(r['hora_fim']),  # r.hora_fim
-                    str(r['status'])   # r.status
+                    str(r[0]),  # r.id
+                    str(r[1]),  # u.nome
+                    str(r[2]),  # c.modelo
+                    str(r[3]),  # r.data_reserva
+                    str(r[4]),  # r.hora_inicio
+                    str(r[5]),  # r.hora_fim
+                    str(r[6])   # r.status
                 ] for r in reservas
             ]
             sheet.append_rows([headers] + data_to_append)
-            logging.info(f'Sync reservas: {len(reservas)} registros sincronizados com o Google Sheets.')
+            logging.info(f'Sync reservas: {len(reservas)} registros atualizados no Sheets.')
         else:
-            sheet.append_rows([['ID', 'Usuário', 'Carro', 'Data', 'Hora Início', 'Hora Fim', 'Status']])
-            logging.info('Sync reservas: Nenhuma reserva para sincronizar. Aba limpa e cabeçalhos adicionados.')
+            logging.warning('Sync reservas: Nenhuma reserva para sincronizar.')
     except Exception as e:
-        logging.error(f'Erro na sincronização de reservas com Google Sheets: {e}')
-        flash('Erro ao sincronizar reservas com o Google Sheets.', 'error')
+        logging.error(f'Erro no sync de reservas para Sheets: {e}')
+        flash('Erro ao sincronizar reservas com o Google Sheets.')
 
 def sync_usuarios_to_sheets():
-    """Sincroniza os usuários do DB para a aba 'Usuarios' do Google Sheets."""
     if not gspread_client:
-        logging.warning('Sync usuários pulado: Cliente gspread não inicializado ou credenciais ausentes.')
-        return
-
-    if GOOGLE_SHEET_ID == 'SUA_SHEET_ID_AQUI':
-        logging.warning('Sync usuários pulado: GOOGLE_SHEET_ID não configurado. Por favor, defina a variável de ambiente.')
+        logging.error('Sync usuários falhou: Cliente gspread não inicializado.')
         return
 
     try:
@@ -287,29 +276,23 @@ def sync_usuarios_to_sheets():
                     str(u['id']),
                     str(u['nome']),
                     str(u['email']),
-                    str(u['cpf'] or ''),
-                    str(u['telefone'] or ''),
+                    str(u['cpf']),
+                    str(u['telefone']),
                     str(u['data_cadastro']),
                     'Sim' if u['is_admin'] else 'Não'
                 ] for u in usuarios
             ]
             sheet.append_rows([headers] + data_to_append)
-            logging.info(f'Sync usuários: {len(usuarios)} registros sincronizados com o Google Sheets.')
+            logging.info(f'Sync usuários: {len(usuarios)} registros atualizados no Sheets.')
         else:
-            sheet.append_rows([['ID', 'Nome', 'Email', 'CPF', 'Telefone', 'Data Cadastro', 'Admin']])
-            logging.info('Sync usuários: Nenhum usuário para sincronizar. Aba limpa e cabeçalhos adicionados.')
+            logging.warning('Sync usuários: Nenhum usuário para sincronizar.')
     except Exception as e:
-        logging.error(f'Erro na sincronização de usuários com Google Sheets: {e}')
-        flash('Erro ao sincronizar usuários com o Google Sheets.', 'error')
+        logging.error(f'Erro no sync de usuários para Sheets: {e}')
+        flash('Erro ao sincronizar usuários com o Google Sheets.')
 
 def sync_carros_to_sheets():
-    """Sincroniza os carros do DB para a aba 'Carros' do Google Sheets."""
     if not gspread_client:
-        logging.warning('Sync carros pulado: Cliente gspread não inicializado ou credenciais ausentes.')
-        return
-
-    if GOOGLE_SHEET_ID == 'SUA_SHEET_ID_AQUI':
-        logging.warning('Sync carros pulado: GOOGLE_SHEET_ID não configurado. Por favor, defina a variável de ambiente.')
+        logging.error('Sync carros falhou: Cliente gspread não inicializado.')
         return
 
     try:
@@ -327,40 +310,24 @@ def sync_carros_to_sheets():
                     str(c['cor']),
                     str(c['placa']),
                     'Sim' if c['disponivel'] else 'Não',
-                    f"R$ {c['preco_diaria']:.2f}"
+                    str(c['preco_diaria'])
                 ] for c in carros
             ]
             sheet.append_rows([headers] + data_to_append)
-            logging.info(f'Sync carros: {len(carros)} registros sincronizados com o Google Sheets.')
+            logging.info(f'Sync carros: {len(carros)} registros atualizados no Sheets.')
         else:
-            sheet.append_rows([['ID', 'Modelo', 'Ano', 'Cor', 'Placa', 'Disponível', 'Preço Diária']])
-            logging.info('Sync carros: Nenhum carro para sincronizar. Aba limpa e cabeçalhos adicionados.')
+            logging.warning('Sync carros: Nenhum carro para sincronizar.')
     except Exception as e:
-        logging.error(f'Erro na sincronização de carros com Google Sheets: {e}')
-        flash('Erro ao sincronizar carros com o Google Sheets.', 'error')
+        logging.error(f'Erro no sync de carros para Sheets: {e}')
+        flash('Erro ao sincronizar carros com o Google Sheets.')
 
-# --- Rotas ---
+# --- 9. Routes ---
 @app.route('/')
 def index():
-    """Redireciona para a página inicial."""
-    return redirect(url_for('home'))
-
-@app.route('/home')
-def home():
-    """Página inicial com lista de carros disponíveis."""
-    try:
-        carros = get_all_cars()
-        if not carros:
-            flash('Nenhum carro disponível no momento. Por favor, adicione carros via painel administrativo.', 'info')
-        return render_template('home.html', carros=carros)
-    except Exception as e:
-        logging.error(f"Erro ao carregar carros na home: {e}")
-        flash('Erro ao carregar a lista de carros. Tente novamente mais tarde.', 'error')
-        return render_template('home.html', carros=[])
+    return render_template('index.html')
 
 @app.route('/registro', methods=['GET', 'POST'])
 def registro():
-    """Rota para registro de novos usuários."""
     if request.method == 'POST':
         nome = request.form['nome']
         email = request.form['email']
@@ -368,216 +335,228 @@ def registro():
         cpf = request.form['cpf']
         telefone = request.form['telefone']
 
-        # Validações básicas
         if not nome or not email or not senha:
-            flash('Todos os campos obrigatórios devem ser preenchidos.', 'error')
-            return render_template('registro.html')
-        
-        # Validação de CPF (apenas dígitos, 11 ou 14 caracteres para CPF/CNPJ)
-        cleaned_cpf = ''.join(filter(str.isdigit, cpf))
-        if not (cleaned_cpf.isdigit() and 10 <= len(cleaned_cpf) <= 11): # Corrigido <=
-            flash('CPF inválido. Deve conter 11 dígitos.', 'error')
-            return render_template('registro.html')
+            flash('Todos os campos obrigatórios devem ser preenchidos.')
+            return redirect(url_for('registro'))
+        if len(senha) < 6:
+            flash('A senha deve ter pelo menos 6 caracteres.')
+            return redirect(url_for('registro'))
+        if not is_valid_cpf(cpf):
+            flash('CPF inválido. Deve conter 11 dígitos.')
+            return redirect(url_for('registro'))
+        if not is_valid_phone(telefone):
+            flash('Telefone inválido. Deve conter 10 ou 11 dígitos.')
+            return redirect(url_for('registro'))
 
-        # Validação de Telefone (apenas dígitos, 10 ou 11 caracteres)
+        cleaned_cpf = ''.join(filter(str.isdigit, cpf))
         cleaned_telefone = ''.join(filter(str.isdigit, telefone))
-        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11): # Corrigido <=
-            flash('Telefone inválido. Deve conter 10 ou 11 dígitos.', 'error')
-            return render_template('registro.html')
 
         conn = get_db_connection()
         try:
-            # Hash da senha
-            senha_hash = hashlib.sha256(senha.encode()).hexdigest()
+            existing_user_email = conn.execute('SELECT id FROM usuarios WHERE email = ?', (email,)).fetchone()
+            if existing_user_email:
+                flash('Este email já está cadastrado.')
+                return redirect(url_for('registro'))
+            existing_user_cpf = conn.execute('SELECT id FROM usuarios WHERE cpf = ?', (cleaned_cpf,)).fetchone()
+            if existing_user_cpf:
+                flash('Este CPF já está cadastrado.')
+                return redirect(url_for('registro'))
 
+            senha_hash = hashlib.sha256(senha.encode()).hexdigest()
             conn.execute('INSERT INTO usuarios (nome, email, senha_hash, cpf, telefone) VALUES (?, ?, ?, ?, ?)',
                          (nome, email, senha_hash, cleaned_cpf, cleaned_telefone))
             conn.commit()
-            flash('Registro realizado com sucesso! Faça login para continuar.', 'success')
-            logging.info(f'Novo usuário registrado: {email}')
+            flash('Registro realizado com sucesso! Faça login.')
+            sync_usuarios_to_sheets()
             return redirect(url_for('login'))
-        except sqlite3.IntegrityError:
-            flash('Email ou CPF já cadastrado. Tente novamente com outros dados.', 'error')
+        except sqlite3.IntegrityError as e:
+            logging.error(f'Erro de integridade ao registrar usuário: {e}')
+            flash('Erro ao registrar. Email ou CPF já podem estar em uso.')
         except Exception as e:
-            flash(f'Erro ao registrar usuário: {e}', 'error')
-            logging.error(f'Erro no registro de usuário: {e}')
+            logging.error(f'Erro inesperado ao registrar usuário: {e}')
+            flash('Ocorreu um erro inesperado. Tente novamente.')
         finally:
             conn.close()
     return render_template('registro.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """Rota para login de usuários."""
     if request.method == 'POST':
         email = request.form['email']
         senha = request.form['senha']
-
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM usuarios WHERE email = ?', (email,)).fetchone()
         conn.close()
 
-        if user:
-            # Verifica a senha
-            senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-            if user['senha_hash'] == senha_hash:
-                session['user_id'] = user['id']
-                session['user_name'] = user['nome']
-                session['is_admin'] = user['is_admin']
-                flash('Login realizado com sucesso!', 'success')
-                logging.info(f'Usuário logado: {email}')
-                return redirect(url_for('home'))
-            else:
-                flash('Senha incorreta.', 'error')
+        if user and hashlib.sha256(senha.encode()).hexdigest() == user['senha_hash']:
+            session['user_id'] = user['id']
+            session['user_name'] = user['nome']
+            session['is_admin'] = user['is_admin']
+            flash('Login realizado com sucesso!')
+            return redirect(url_for('home'))
         else:
-            flash('Email não encontrado.', 'error')
+            flash('Email ou senha incorretos.')
     return render_template('login.html')
 
 @app.route('/logout')
 def logout():
-    """Rota para logout de usuários."""
     session.pop('user_id', None)
     session.pop('user_name', None)
     session.pop('is_admin', None)
-    flash('Você foi desconectado.', 'info')
-    logging.info('Usuário desconectado.')
-    return redirect(url_for('home'))
+    flash('Você foi desconectado.')
+    return redirect(url_for('index'))
+
+@app.route('/home')
+def home():
+    if 'user_id' not in session:
+        flash('Por favor, faça login para acessar esta página.')
+        return redirect(url_for('login'))
+
+    try:
+        carros = get_all_cars()
+        logging.info(f'Home: Carregados {len(carros)} carros.')
+        return render_template('home.html', carros=carros)
+    except Exception as e:
+        logging.error(f'Erro ao carregar carros na home: {e}')
+        flash('Não foi possível carregar os carros no momento.')
+        return redirect(url_for('index'))
+
+@app.route('/reservas')
+def reservas():
+    if 'user_id' not in session:
+        flash('Por favor, faça login para acessar suas reservas.')
+        return redirect(url_for('login'))
+
+    try:
+        conn = get_db_connection()
+        user_reservas = conn.execute('''SELECT r.*, c.modelo, c.placa, c.preco_diaria
+                                        FROM reservas r
+                                        JOIN usuarios u ON r.usuario_id = u.id
+                                        JOIN carros c ON r.carro_id = c.id
+                                        WHERE r.usuario_id = ?
+                                        ORDER BY r.data_reserva DESC''', (session['user_id'],)).fetchall()
+        conn.close()
+        logging.info(f'Reservas do usuário {session["user_id"]}: Encontradas {len(user_reservas)}.')
+        return render_template('reservas.html', reservas=user_reservas)
+    except Exception as e:
+        logging.error(f'Erro ao carregar reservas do usuário {session["user_id"]}: {e}')
+        flash('Não foi possível carregar suas reservas no momento.')
+        return redirect(url_for('home'))
 
 @app.route('/reservar/<int:car_id>', methods=['GET', 'POST'])
 def reservar(car_id):
-    """Rota para reservar um carro."""
     if 'user_id' not in session:
-        flash('Você precisa estar logado para fazer uma reserva.', 'warning')
+        flash('Por favor, faça login para reservar um carro.')
         return redirect(url_for('login'))
 
-    car = get_car_by_id(car_id)
-    if not car:
-        flash('Carro não encontrado.', 'error')
+    carro = get_car_by_id(car_id)
+    if not carro:
+        flash('Carro não encontrado.')
         return redirect(url_for('home'))
-
-    if not car['disponivel']:
-        flash('Este carro não está disponível para reserva no momento.', 'warning')
+    if not carro['disponivel']:
+        flash('Este carro não está disponível para reserva.')
         return redirect(url_for('home'))
 
     if request.method == 'POST':
         data_reserva_str = request.form['data_reserva']
         hora_inicio_str = request.form['hora_inicio']
         hora_fim_str = request.form['hora_fim']
-        observacoes = request.form.get('observacoes', '')
+        observacoes = request.form.get('observacoes')
 
         try:
             data_reserva = datetime.strptime(data_reserva_str, '%Y-%m-%d').date()
             hora_inicio = datetime.strptime(hora_inicio_str, '%H:%M').time()
             hora_fim = datetime.strptime(hora_fim_str, '%H:%M').time()
 
-            # Validação de data e hora
             if data_reserva < datetime.now().date():
-                flash('Não é possível reservar para uma data passada.', 'error')
-                return render_template('reservar.html', car=car)
+                flash('Não é possível reservar para uma data passada.')
+                return render_template('reservar.html', carro=carro)
             if data_reserva == datetime.now().date() and hora_inicio < datetime.now().time():
-                flash('Não é possível reservar para um horário passado no dia de hoje.', 'error')
-                return render_template('reservar.html', car=car)
+                flash('Não é possível reservar para um horário passado no dia de hoje.')
+                return render_template('reservar.html', carro=carro)
             if hora_inicio >= hora_fim:
-                flash('A hora de início deve ser anterior à hora de fim.', 'error')
-                return render_template('reservar.html', car=car)
+                flash('A hora de início deve ser anterior à hora de fim.')
+                return render_template('reservar.html', carro=carro)
 
             conn = get_db_connection()
+            conflito = conn.execute('''SELECT id FROM reservas
+                                       WHERE carro_id = ? AND data_reserva = ?
+                                       AND (
+                                           (hora_inicio < ? AND hora_fim > ?) OR
+                                           (hora_inicio < ? AND hora_fim > ?) OR
+                                           (hora_inicio >= ? AND hora_fim <= ?)
+                                       ) AND status != 'cancelada' ''',
+                                    (car_id, data_reserva, hora_fim, hora_inicio, hora_inicio, hora_fim, hora_inicio, hora_fim)).fetchone()
+
+            if conflito:
+                flash('Carro já reservado para este período.')
+                conn.close()
+                return render_template('reservar.html', carro=carro)
+
             conn.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, observacoes) VALUES (?, ?, ?, ?, ?, ?)',
                          (session['user_id'], car_id, data_reserva, hora_inicio, hora_fim, observacoes))
-            conn.execute('UPDATE carros SET disponivel = FALSE WHERE id = ?', (car_id,))
             conn.commit()
             conn.close()
-
-            flash('Reserva realizada com sucesso!', 'success')
-            logging.info(f"Reserva criada: Usuário {session['user_id']} reservou carro {car_id} para {data_reserva}")
-            sync_reservas_to_sheets() # Sincroniza após a reserva
-            sync_carros_to_sheets() # Sincroniza status do carro
-            return redirect(url_for('minhas_reservas'))
+            flash('Reserva realizada com sucesso!')
+            sync_reservas_to_sheets()
+            return redirect(url_for('reservas'))
         except ValueError:
-            flash('Formato de data ou hora inválido.', 'error')
+            flash('Formato de data ou hora inválido.')
         except Exception as e:
-            flash(f'Erro ao realizar reserva: {e}', 'error')
             logging.error(f'Erro ao realizar reserva: {e}')
-    
-    return render_template('reservar.html', car=car)
+            flash('Ocorreu um erro ao processar sua reserva.')
 
-@app.route('/minhas_reservas')
-def minhas_reservas():
-    """Exibe as reservas do usuário logado."""
-    if 'user_id' not in session:
-        flash('Você precisa estar logado para ver suas reservas.', 'warning')
-        return redirect(url_for('login'))
-
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''SELECT 
-                    r.id, 
-                    c.modelo as carro_modelo, 
-                    r.data_reserva, 
-                    r.hora_inicio, 
-                    r.hora_fim, 
-                    r.status,
-                    r.observacoes
-                 FROM reservas r 
-                 JOIN carros c ON r.carro_id = c.id 
-                 WHERE r.usuario_id = ? 
-                 ORDER BY r.data_reserva DESC''', (session['user_id'],))
-    reservas = c.fetchall()
-    conn.close()
-    return render_template('minhas_reservas.html', reservas=reservas)
+    return render_template('reservar.html', carro=carro)
 
 @app.route('/cancelar_reserva/<int:reserva_id>')
 def cancelar_reserva(reserva_id):
-    """Cancela uma reserva."""
     if 'user_id' not in session:
-        flash('Você precisa estar logado para cancelar uma reserva.', 'warning')
+        flash('Acesso negado.')
         return redirect(url_for('login'))
 
     conn = get_db_connection()
     reserva = conn.execute('SELECT * FROM reservas WHERE id = ? AND usuario_id = ?', (reserva_id, session['user_id'])).fetchone()
 
     if not reserva:
-        flash('Reserva não encontrada ou você não tem permissão para cancelá-la.', 'error')
+        flash('Reserva não encontrada ou você não tem permissão para cancelá-la.')
         conn.close()
-        return redirect(url_for('minhas_reservas'))
+        return redirect(url_for('reservas'))
 
     try:
         conn.execute('UPDATE reservas SET status = ? WHERE id = ?', ('cancelada', reserva_id))
-        conn.execute('UPDATE carros SET disponivel = TRUE WHERE id = ?', (reserva['carro_id'],))
         conn.commit()
-        flash('Reserva cancelada com sucesso!', 'success')
-        logging.info(f"Reserva {reserva_id} cancelada pelo usuário {session['user_id']}")
-        sync_reservas_to_sheets() # Sincroniza após o cancelamento
-        sync_carros_to_sheets() # Sincroniza status do carro
+        flash('Reserva cancelada com sucesso.')
+        sync_reservas_to_sheets()
     except Exception as e:
-        flash(f'Erro ao cancelar reserva: {e}', 'error')
         logging.error(f'Erro ao cancelar reserva {reserva_id}: {e}')
+        flash('Erro ao cancelar reserva.')
     finally:
         conn.close()
-    return redirect(url_for('minhas_reservas'))
+    return redirect(url_for('reservas'))
 
+# --- 10. Admin Routes ---
 @app.route('/admin')
-def admin_panel():
-    """Painel administrativo."""
+def admin():
     if not is_admin():
-        flash('Acesso negado. Você não tem permissão de administrador.', 'error')
-        return redirect(url_for('home'))
-    
+        flash('Acesso negado. Apenas administradores.')
+        return redirect(url_for('login'))
+
     try:
-        reservas = get_reservas()
         usuarios = get_usuarios()
         carros = get_all_cars()
-        return render_template('admin.html', reservas=reservas, usuarios=usuarios, carros=carros)
+        reservas = get_reservas()
+        logging.info(f'Admin: Carregados {len(usuarios)} usuários, {len(carros)} carros, {len(reservas)} reservas.')
+        return render_template('admin.html', usuarios=usuarios, carros=carros, reservas=reservas)
     except Exception as e:
-        logging.error(f"Erro ao carregar painel admin: {e}")
-        flash('Erro ao carregar dados do painel administrativo.', 'error')
-        return render_template('admin.html', reservas=[], usuarios=[], carros=[])
+        logging.error(f'Erro ao carregar painel admin: {e}')
+        flash('Erro ao carregar dados administrativos.')
+        return redirect(url_for('home'))
 
 @app.route('/admin/add_carro', methods=['GET', 'POST'])
-def admin_add_carro():
-    """Adiciona um novo carro (apenas admin)."""
+def add_carro():
     if not is_admin():
-        flash('Acesso negado.', 'error')
-        return redirect(url_for('home'))
+        flash('Acesso negado.')
+        return redirect(url_for('login'))
 
     if request.method == 'POST':
         modelo = request.form['modelo']
@@ -587,39 +566,38 @@ def admin_add_carro():
         preco_diaria = request.form['preco_diaria']
 
         if not modelo or not ano or not cor or not placa or not preco_diaria:
-            flash('Todos os campos são obrigatórios.', 'error')
-            return render_template('admin_add_carro.html')
-        
+            flash('Todos os campos são obrigatórios.')
+            return redirect(url_for('add_carro'))
+
         try:
             conn = get_db_connection()
             conn.execute('INSERT INTO carros (modelo, ano, cor, placa, preco_diaria) VALUES (?, ?, ?, ?, ?)',
-                         (modelo, ano, cor, placa, float(preco_diaria)))
+                         (modelo, int(ano), cor, placa, float(preco_diaria)))
             conn.commit()
-            conn.close()
-            flash('Carro adicionado com sucesso!', 'success')
-            logging.info(f'Carro adicionado: {modelo} ({placa})')
-            sync_carros_to_sheets() # Sincroniza após adicionar carro
-            return redirect(url_for('admin_panel'))
+            flash('Carro adicionado com sucesso!')
+            sync_carros_to_sheets()
+            return redirect(url_for('admin'))
         except sqlite3.IntegrityError:
-            flash('Placa já cadastrada. Verifique os dados.', 'error')
+            flash('Placa já cadastrada.')
         except ValueError:
-            flash('Preço diária inválido. Use um número.', 'error')
+            flash('Ano ou preço diária inválidos.')
         except Exception as e:
-            flash(f'Erro ao adicionar carro: {e}', 'error')
             logging.error(f'Erro ao adicionar carro: {e}')
-    return render_template('admin_add_carro.html')
+            flash('Erro ao adicionar carro.')
+        finally:
+            conn.close()
+    return render_template('add_carro.html')
 
 @app.route('/admin/edit_carro/<int:car_id>', methods=['GET', 'POST'])
-def admin_edit_carro(car_id):
-    """Edita um carro existente (apenas admin)."""
+def edit_carro(car_id):
     if not is_admin():
-        flash('Acesso negado.', 'error')
-        return redirect(url_for('home'))
+        flash('Acesso negado.')
+        return redirect(url_for('login'))
 
-    car = get_car_by_id(car_id)
-    if not car:
-        flash('Carro não encontrado.', 'error')
-        return redirect(url_for('admin_panel'))
+    carro = get_car_by_id(car_id)
+    if not carro:
+        flash('Carro não encontrado.')
+        return redirect(url_for('admin'))
 
     if request.method == 'POST':
         modelo = request.form['modelo']
@@ -630,257 +608,244 @@ def admin_edit_carro(car_id):
         disponivel = 'disponivel' in request.form
 
         if not modelo or not ano or not cor or not placa or not preco_diaria:
-            flash('Todos os campos são obrigatórios.', 'error')
-            return render_template('admin_edit_carro.html', car=car)
-        
+            flash('Todos os campos são obrigatórios.')
+            return redirect(url_for('edit_carro', car_id=car_id))
+
         try:
             conn = get_db_connection()
             conn.execute('UPDATE carros SET modelo = ?, ano = ?, cor = ?, placa = ?, preco_diaria = ?, disponivel = ? WHERE id = ?',
-                         (modelo, ano, cor, placa, float(preco_diaria), disponivel, car_id))
+                         (modelo, int(ano), cor, placa, float(preco_diaria), disponivel, car_id))
             conn.commit()
-            conn.close()
-            flash('Carro atualizado com sucesso!', 'success')
-            logging.info(f'Carro {car_id} atualizado: {modelo} ({placa})')
-            sync_carros_to_sheets() # Sincroniza após editar carro
-            return redirect(url_for('admin_panel'))
+            flash('Carro atualizado com sucesso!')
+            sync_carros_to_sheets()
+            return redirect(url_for('admin'))
         except sqlite3.IntegrityError:
-            flash('Placa já cadastrada para outro carro. Verifique os dados.', 'error')
+            flash('Placa já cadastrada para outro carro.')
         except ValueError:
-            flash('Preço diária inválido. Use um número.', 'error')
+            flash('Ano ou preço diária inválidos.')
         except Exception as e:
-            flash(f'Erro ao editar carro: {e}', 'error')
             logging.error(f'Erro ao editar carro {car_id}: {e}')
-    return render_template('admin_edit_carro.html', car=car)
+            flash('Erro ao atualizar carro.')
+        finally:
+            conn.close()
+
+    return render_template('edit_carro.html', carro=carro)
 
 @app.route('/admin/delete_carro/<int:car_id>')
-def admin_delete_carro(car_id):
-    """Deleta um carro (apenas admin)."""
+def delete_carro(car_id):
     if not is_admin():
-        flash('Acesso negado.', 'error')
-        return redirect(url_for('home'))
+        flash('Acesso negado.')
+        return redirect(url_for('login'))
 
     conn = get_db_connection()
     try:
-        # Verifica se há reservas ativas para este carro
-        reservas_ativas = conn.execute('SELECT COUNT(*) FROM reservas WHERE carro_id = ? AND status IN (?, ?)', (car_id, 'pendente', 'confirmada')).fetchone()[0]
-        if reservas_ativas > 0:
-            flash(f'Não é possível deletar o carro. Existem {reservas_ativas} reservas ativas para ele.', 'error')
-            return redirect(url_for('admin_panel'))
+        active_reservas = conn.execute("SELECT COUNT(*) FROM reservas WHERE carro_id = ? AND status != 'cancelada'", (car_id,)).fetchone()[0]
+        if active_reservas > 0:
+            flash('Não é possível deletar carro com reservas ativas.')
+            return redirect(url_for('admin'))
 
         conn.execute('DELETE FROM carros WHERE id = ?', (car_id,))
         conn.commit()
-        flash('Carro deletado com sucesso!', 'success')
-        logging.info(f'Carro {car_id} deletado.')
-        sync_carros_to_sheets() # Sincroniza após deletar carro
+        flash('Carro deletado com sucesso!')
+        sync_carros_to_sheets()
     except Exception as e:
-        flash(f'Erro ao deletar carro: {e}', 'error')
         logging.error(f'Erro ao deletar carro {car_id}: {e}')
+        flash('Erro ao deletar carro.')
     finally:
         conn.close()
-    return redirect(url_for('admin_panel'))
-
-@app.route('/admin/update_reserva_status/<int:reserva_id>/<string:status>')
-def admin_update_reserva_status(reserva_id, status):
-    """Atualiza o status de uma reserva (apenas admin)."""
-    if not is_admin():
-        flash('Acesso negado.', 'error')
-        return redirect(url_for('home'))
-
-    conn = get_db_connection()
-    try:
-        conn.execute('UPDATE reservas SET status = ? WHERE id = ?', (status, reserva_id))
-        conn.commit()
-        flash(f'Status da reserva {reserva_id} atualizado para "{status}" com sucesso!', 'success')
-        logging.info(f'Reserva {reserva_id} status atualizado para: {status}')
-        sync_reservas_to_sheets() # Sincroniza após atualizar status
-    except Exception as e:
-        flash(f'Erro ao atualizar status da reserva: {e}', 'error')
-        logging.error(f'Erro ao atualizar status da reserva {reserva_id}: {e}')
-    finally:
-        conn.close()
-    return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin'))
 
 @app.route('/admin/promote_admin/<int:user_id>')
-def admin_promote_admin(user_id):
-    """Promove um usuário a administrador (apenas admin)."""
+def promote_admin(user_id):
     if not is_admin():
-        flash('Acesso negado.', 'error')
-        return redirect(url_for('home'))
+        flash('Acesso negado.')
+        return redirect(url_for('login'))
 
     conn = get_db_connection()
     try:
         conn.execute('UPDATE usuarios SET is_admin = TRUE WHERE id = ?', (user_id,))
         conn.commit()
-        flash(f'Usuário {user_id} promovido a administrador com sucesso!', 'success')
-        logging.info(f'Usuário {user_id} promovido a admin.')
-        sync_usuarios_to_sheets() # Sincroniza após promover admin
+        flash('Usuário promovido a administrador com sucesso!')
+        sync_usuarios_to_sheets()
     except Exception as e:
-        flash(f'Erro ao promover usuário a admin: {e}', 'error')
         logging.error(f'Erro ao promover usuário {user_id} a admin: {e}')
+        flash('Erro ao promover usuário.')
     finally:
         conn.close()
-    return redirect(url_for('admin_panel'))
+    return redirect(url_for('admin'))
+
+@app.route('/admin/update_reserva_status/<int:reserva_id>', methods=['POST'])
+def update_reserva_status(reserva_id):
+    if not is_admin():
+        flash('Acesso negado.')
+        return redirect(url_for('login'))
+
+    new_status = request.form['status']
+    conn = get_db_connection()
+    try:
+        conn.execute('UPDATE reservas SET status = ? WHERE id = ?', (new_status, reserva_id))
+        conn.commit()
+        flash(f'Status da reserva {reserva_id} atualizado para {new_status}.')
+        sync_reservas_to_sheets()
+    except Exception as e:
+        logging.error(f'Erro ao atualizar status da reserva {reserva_id}: {e}')
+        flash('Erro ao atualizar status da reserva.')
+    finally:
+        conn.close()
+    return redirect(url_for('admin'))
 
 @app.route('/admin/sync_sheets')
-def admin_sync_sheets():
-    """Sincroniza todos os dados com o Google Sheets (apenas admin)."""
+def trigger_sync_sheets():
     if not is_admin():
-        flash('Acesso negado.', 'error')
-        return redirect(url_for('home'))
-
-    if not gspread_client:
-        flash('Sincronização com Google Sheets desativada (credenciais ausentes ou erro).', 'error')
-        return redirect(url_for('admin_panel'))
+        flash('Acesso negado.')
+        return redirect(url_for('login'))
 
     try:
         sync_reservas_to_sheets()
         sync_usuarios_to_sheets()
         sync_carros_to_sheets()
-        flash('Dados sincronizados com o Google Sheets com sucesso!', 'success')
-        logging.info('Todas as abas do Google Sheets sincronizadas.')
+        flash('Sincronização com Google Sheets concluída!')
     except Exception as e:
-        flash(f'Erro geral ao sincronizar com Google Sheets: {e}', 'error')
-        logging.error(f'Erro geral ao sincronizar com Google Sheets: {e}')
-    return redirect(url_for('admin_panel'))
+        logging.error(f'Erro geral ao acionar sincronização: {e}')
+        flash('Erro ao acionar sincronização com Google Sheets.')
+    return redirect(url_for('admin'))
 
 @app.route('/admin/backup_db')
-def admin_backup_db():
-    """Gera um backup do banco de dados em formato JSON (apenas admin)."""
+def backup_db():
     if not is_admin():
-        flash('Acesso negado.', 'error')
-        return redirect(url_for('home'))
+        flash('Acesso negado.')
+        return redirect(url_for('admin'))
 
-    conn = get_db_connection()
     try:
+        conn = get_db_connection()
+
         reservas = conn.execute('SELECT * FROM reservas').fetchall()
         usuarios = conn.execute('SELECT * FROM usuarios').fetchall()
         carros = conn.execute('SELECT * FROM carros').fetchall()
 
-        # Converte Row objects para dicionários para serialização JSON
-        reservas_list = [dict(r) for r in reservas]
-        usuarios_list = [dict(u) for u in usuarios]
-        carros_list = [dict(c) for c in carros]
+        conn.close()
 
-        backup_data = {
-            'timestamp': datetime.now().isoformat(),
+        reservas_list = [dict(row) for row in reservas]
+        usuarios_list = [dict(row) for row in usuarios]
+        carros_list = [dict(row) for row in carros]
+
+        data = {
             'reservas': reservas_list,
             'usuarios': usuarios_list,
-            'carros': carros_list
+            'carros': carros_list,
+            'timestamp': datetime.now().isoformat(),
+            'hash': hashlib.md5(json.dumps(reservas_list + usuarios_list + carros_list, default=str).encode()).hexdigest()
         }
-        
-        # Gera um hash do conteúdo para verificação de integridade
-        backup_json_str = json.dumps(backup_data, indent=4, ensure_ascii=False)
-        backup_data['hash'] = hashlib.sha256(backup_json_str.encode()).hexdigest()
 
-        # Recria o JSON com o hash
-        backup_json_str_final = json.dumps(backup_data, indent=4, ensure_ascii=False)
+        json_data = json.dumps(data, default=str, indent=4)
+        logging.info(f'Backup gerado: {len(reservas_list)} reservas, {len(usuarios_list)} cadastros, {len(carros_list)} carros exportados.')
 
-        buffer = BytesIO()
-        buffer.write(backup_json_str_final.encode('utf-8'))
-        buffer.seek(0)
+        output = BytesIO()
+        output.write(json_data.encode('utf-8'))
+        output.seek(0)
 
-        logging.info(f"Backup gerado: {len(reservas_list)} reservas, {len(usuarios_list)} usuários, {len(carros_list)} carros exportados.")
-        flash('Backup do banco de dados gerado com sucesso!', 'success')
-        return send_file(buffer, as_attachment=True, download_name=f'jgminis_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json', mimetype='application/json')
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return send_file(output, as_attachment=True, download_name=f'backup_jgminis_{timestamp}.json', mimetype='application/json')
     except Exception as e:
-        flash(f'Erro ao gerar backup do banco de dados: {e}', 'error')
-        logging.error(f'Erro ao gerar backup do DB: {e}')
-    finally:
-        conn.close()
-    return redirect(url_for('admin_panel'))
+        logging.error(f'Erro no backup: {e}')
+        flash('Erro ao gerar backup.')
+        return redirect(url_for('admin'))
 
 @app.route('/admin/restore_backup', methods=['GET', 'POST'])
-def admin_restore_backup():
-    """Restaura o banco de dados a partir de um arquivo JSON de backup (apenas admin)."""
+def restore_backup():
     if not is_admin():
-        flash('Acesso negado.', 'error')
-        return redirect(url_for('home'))
+        flash('Acesso negado.')
+        return redirect(url_for('admin'))
 
     if request.method == 'POST':
         if 'backup_file' not in request.files:
-            flash('Nenhum arquivo de backup selecionado.', 'error')
-            return redirect(url_for('admin_panel'))
-        
+            flash('Nenhum arquivo selecionado.')
+            return redirect(url_for('restore_backup'))
+
         file = request.files['backup_file']
         if file.filename == '':
-            flash('Nenhum arquivo de backup selecionado.', 'error')
-            return redirect(url_for('admin_panel'))
-        
+            flash('Nenhum arquivo selecionado.')
+            return redirect(url_for('restore_backup'))
+
         if file and file.filename.endswith('.json'):
             try:
-                backup_content = file.read().decode('utf-8')
-                backup_data = json.loads(backup_content)
+                backup_data = json.loads(file.read().decode('utf-8'))
 
-                # Verifica integridade do hash
-                received_hash = backup_data.pop('hash', None)
-                if received_hash:
-                    calculated_hash = hashlib.sha256(json.dumps(backup_data, indent=4, ensure_ascii=False).encode()).hexdigest()
-                    if received_hash != calculated_hash:
-                        flash('Erro de integridade do backup: hash não corresponde.', 'error')
-                        logging.error('Erro de integridade do backup: hash não corresponde.')
-                        return redirect(url_for('admin_panel'))
-                else:
-                    logging.warning('Backup sem hash de integridade. Prosseguindo com a restauração.')
+                if not all(k in backup_data for k in ['reservas', 'usuarios', 'carros', 'timestamp', 'hash']):
+                    flash('Arquivo de backup inválido: estrutura incompleta.')
+                    return redirect(url_for('restore_backup'))
+
+                expected_hash = backup_data.get('hash')
+                calculated_hash = hashlib.md5(json.dumps(backup_data['reservas'] + backup_data['usuarios'] + backup_data['carros'], default=str).encode()).hexdigest()
+                if expected_hash and expected_hash != calculated_hash:
+                    flash('Aviso: Hash do backup não corresponde. O arquivo pode estar corrompido ou modificado.')
 
                 conn = get_db_connection()
                 c = conn.cursor()
 
-                # Limpa tabelas existentes (cuidado: isso apaga dados atuais!)
                 c.execute('DELETE FROM reservas')
                 c.execute('DELETE FROM usuarios')
                 c.execute('DELETE FROM carros')
 
-                # Restaura carros
-                for car_data in backup_data.get('carros', []):
-                    c.execute('INSERT INTO carros (id, modelo, ano, cor, placa, disponivel, preco_diaria) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                              (car_data['id'], car_data['modelo'], car_data['ano'], car_data['cor'], car_data['placa'], car_data['disponivel'], car_data['preco_diaria']))
-                
-                # Restaura usuários
-                for user_data in backup_data.get('usuarios', []):
-                    c.execute('INSERT INTO usuarios (id, nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                              (user_data['id'], user_data['nome'], user_data['email'], user_data['senha_hash'], user_data['cpf'], user_data['telefone'], user_data['data_cadastro'], user_data['is_admin']))
-                
-                # Restaura reservas
-                for reserva_data in backup_data.get('reservas', []):
-                    c.execute('INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                              (reserva_data['id'], reserva_data['usuario_id'], reserva_data['carro_id'], reserva_data['data_reserva'], reserva_data['hora_inicio'], reserva_data['hora_fim'], reserva_data['status'], reserva_data['observacoes']))
-                
+                for user_data in backup_data['usuarios']:
+                    c.execute('''INSERT INTO usuarios (id, nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                                 (user_data['id'], user_data['nome'], user_data['email'], user_data['senha_hash'],
+                                  user_data['cpf'], user_data['telefone'], user_data['data_cadastro'], user_data['is_admin']))
+
+                for car_data in backup_data['carros']:
+                    c.execute('''INSERT INTO carros (id, modelo, ano, cor, placa, disponivel, preco_diaria)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                                 (car_data['id'], car_data['modelo'], car_data['ano'], car_data['cor'],
+                                  car_data['placa'], car_data['disponivel'], car_data['preco_diaria']))
+
+                for reserva_data in backup_data['reservas']:
+                    c.execute('''INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                                 (reserva_data['id'], reserva_data['usuario_id'], reserva_data['carro_id'],
+                                  reserva_data['data_reserva'], reserva_data['hora_inicio'], reserva_data['hora_fim'],
+                                  reserva_data['status'], reserva_data['observacoes']))
+
                 conn.commit()
                 conn.close()
-                flash('Banco de dados restaurado com sucesso a partir do backup!', 'success')
-                logging.info(f"DB restaurado: {len(backup_data.get('reservas', []))} reservas, {len(backup_data.get('usuarios', []))} usuários, {len(backup_data.get('carros', []))} carros.")
-                
-                # Sincroniza com Sheets após restauração
-                sync_reservas_to_sheets()
+                flash('Backup restaurado com sucesso! Sincronizando com Sheets...')
+
                 sync_usuarios_to_sheets()
                 sync_carros_to_sheets()
+                sync_reservas_to_sheets()
 
+                return redirect(url_for('admin'))
             except json.JSONDecodeError:
-                flash('Arquivo de backup inválido: não é um JSON válido.', 'error')
-                logging.error('Arquivo de backup inválido: JSONDecodeError.')
-            except sqlite3.Error as e:
-                flash(f'Erro ao restaurar banco de dados: {e}', 'error')
-                logging.error(f'Erro SQLite ao restaurar DB: {e}')
+                flash('Arquivo de backup inválido: não é um JSON válido.')
+            except sqlite3.IntegrityError as e:
+                flash(f'Erro de integridade ao restaurar: {e}. Verifique se IDs são únicos.')
             except Exception as e:
-                flash(f'Erro inesperado ao restaurar backup: {e}', 'error')
-                logging.error(f'Erro inesperado ao restaurar backup: {e}')
+                logging.error(f'Erro ao restaurar backup: {e}')
+                flash(f'Erro inesperado ao restaurar backup: {e}')
         else:
-            flash('Por favor, selecione um arquivo JSON válido.', 'error')
-    return redirect(url_for('admin_panel'))
+            flash('Por favor, selecione um arquivo JSON.')
 
-# --- Tratamento de Erros ---
-@app.errorhandler(500)
-def internal_server_error(e):
-    """Manipulador de erro para 500 Internal Server Error."""
-    logging.exception('Ocorreu um erro interno no servidor.')
-    flash('Ocorreu um erro inesperado no servidor. Por favor, tente novamente mais tarde.', 'error')
-    return render_template('error.html', error_message='Erro Interno do Servidor'), 500
+    return render_template('restore_backup.html')
 
+# --- 11. API Endpoints (Exemplo) ---
+@app.route('/api/carros')
+def api_carros():
+    carros = get_all_cars()
+    carros_dict = [dict(carro) for carro in carros]
+    return jsonify(carros_dict)
+
+# --- 12. Global Error Handlers ---
 @app.errorhandler(404)
-def page_not_found(e):
-    """Manipulador de erro para 404 Not Found."""
-    return render_template('error.html', error_message='Página não encontrada'), 404
+def not_found_error(error):
+    logging.warning(f'Página não encontrada (404): {request.url}')
+    return render_template('error.html', error_message='Página não encontrada.'), 404
 
+@app.errorhandler(500)
+def internal_error(error):
+    logging.error(f'Erro interno do servidor (500): {error}', exc_info=True)
+    flash('Ocorreu um erro interno no servidor. Por favor, tente novamente mais tarde.')
+    return render_template('error.html', error_message='Erro interno do servidor.'), 500
+
+# --- 13. Application Execution ---
 if __name__ == '__main__':
     app.run(debug=True)
-
