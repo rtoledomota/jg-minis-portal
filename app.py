@@ -21,10 +21,10 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.13') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.14') # Chave secreta para sessões
 
-# Define o caminho do banco de dados, usando variável de ambiente ou padrão
-DATABASE_PATH = os.environ.get('DATABASE_PATH', 'jgminis.db')
+# Caminho do banco de dados (persistente no Railway via /tmp)
+DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db')
 
 # --- Funções de Banco de Dados ---
 def init_db():
@@ -85,14 +85,12 @@ def init_db():
         usuarios_count = c.fetchone()[0]
         if usuarios_count == 0:
             logging.warning('DB inicializado: 0 usuários encontrados. Criando usuário admin padrão.')
-            # Cria usuário admin padrão se o DB estiver vazio
-            admin_email = 'admin@jgminis.com.br'
-            admin_senha_hash = hashlib.sha256('admin123'.encode()).hexdigest()
+            # Cria admin padrão se nenhum usuário existir
+            senha_hash = hashlib.sha256('admin123'.encode()).hexdigest()
             c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
-                      ('Administrador', admin_email, admin_senha_hash, True))
+                      ('Admin Padrão', 'admin@jgminis.com.br', senha_hash, True))
             conn.commit()
-            logging.info(f'Usuário admin padrão criado: {admin_email} (senha: admin123)')
-            usuarios_count = 1 # Atualiza a contagem para o log
+            logging.info('DB inicializado: Usuário admin padrão criado (admin@jgminis.com.br, senha: admin123).')
         else:
             logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
 
@@ -103,6 +101,7 @@ def init_db():
         else:
             logging.info(f'DB inicializado: {carros_count} carros preservados.')
 
+        logging.info('App bootado com sucesso.')
     except sqlite3.Error as e:
         logging.error(f"Erro ao inicializar o banco de dados: {e}")
     finally:
@@ -141,51 +140,62 @@ def get_car_by_id(car_id):
 
 def get_all_cars():
     """Busca todos os carros."""
-    conn = get_db_connection()
-    cars = conn.execute('SELECT * FROM carros').fetchall()
-    conn.close()
-    if len(cars) == 0:
-        logging.info('DB: 0 carros encontrados.')
-    return cars
+    try:
+        conn = get_db_connection()
+        cars = conn.execute('SELECT * FROM carros').fetchall()
+        conn.close()
+        if len(cars) == 0:
+            logging.info('DB vazio: 0 carros encontrados.')
+        return cars
+    except Exception as e:
+        logging.error(f"Erro ao carregar carros: {e}")
+        return []
 
 def get_reservas():
     """Busca todas as reservas com detalhes de usuário e carro."""
-    conn = get_db_connection()
-    c = conn.cursor()
-    # Seleciona colunas explicitamente na ordem para facilitar o mapeamento para Sheets
-    c.execute('''SELECT 
-                    r.id, 
-                    u.nome as usuario_nome, 
-                    c.modelo as carro_modelo, 
-                    r.data_reserva, 
-                    r.hora_inicio, 
-                    r.hora_fim, 
-                    r.status,
-                    r.usuario_id,
-                    r.carro_id,
-                    r.observacoes
-                 FROM reservas r 
-                 JOIN usuarios u ON r.usuario_id = u.id 
-                 JOIN carros c ON r.carro_id = c.id 
-                 ORDER BY r.data_reserva DESC''')
-    reservas = c.fetchall()
-    if len(reservas) == 0:
-        logging.info('DB: 0 reservas encontradas.')
-    else:
-        logging.info(f'DB: Encontradas {len(reservas)} registros de reservas.')
-    conn.close()
-    return reservas
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''SELECT 
+                        r.id, 
+                        u.nome as usuario_nome, 
+                        c.modelo as carro_modelo, 
+                        r.data_reserva, 
+                        r.hora_inicio, 
+                        r.hora_fim, 
+                        r.status,
+                        r.usuario_id,
+                        r.carro_id,
+                        r.observacoes
+                     FROM reservas r 
+                     JOIN usuarios u ON r.usuario_id = u.id 
+                     JOIN carros c ON r.carro_id = c.id 
+                     ORDER BY r.data_reserva DESC''')
+        reservas = c.fetchall()
+        if len(reservas) == 0:
+            logging.info('DB vazio: 0 reservas encontradas.')
+        else:
+            logging.info(f'Reservas: Encontradas {len(reservas)} registros no DB.')
+        conn.close()
+        return reservas
+    except Exception as e:
+        logging.error(f"Erro ao carregar reservas: {e}")
+        return []
 
 def get_usuarios():
     """Busca todos os usuários."""
-    conn = get_db_connection()
-    usuarios = conn.execute('SELECT * FROM usuarios').fetchall()
-    conn.close()
-    if len(usuarios) == 0:
-        logging.info('DB: 0 usuários encontrados.')
-    else:
-        logging.info(f'DB: Encontrados {len(usuarios)} registros de usuários.')
-    return usuarios
+    try:
+        conn = get_db_connection()
+        usuarios = conn.execute('SELECT * FROM usuarios').fetchall()
+        conn.close()
+        if len(usuarios) == 0:
+            logging.info('DB vazio: 0 usuários encontrados.')
+        else:
+            logging.info(f'Usuários: Encontrados {len(usuarios)} registros no DB.')
+        return usuarios
+    except Exception as e:
+        logging.error(f"Erro ao carregar usuários: {e}")
+        return []
 
 # --- Funções de Autenticação e Autorização ---
 def is_admin():
@@ -350,6 +360,12 @@ def sync_carros_to_sheets():
         logging.error(f'Erro na sincronização de carros com Google Sheets: {e}')
         flash('Erro ao sincronizar carros com o Google Sheets.', 'error')
 
+# Rota de saúde para Railway (retorna OK se app vivo)
+@app.route('/health')
+def health():
+    """Endpoint de saúde para verificação do Railway."""
+    return 'OK', 200
+
 # --- Rotas ---
 @app.route('/')
 def index():
@@ -384,15 +400,15 @@ def registro():
             flash('Todos os campos obrigatórios devem ser preenchidos.', 'error')
             return render_template('registro.html')
         
-        # Validação de CPF (apenas dígitos, 11 ou 14 caracteres para CPF/CNPJ)
+        # Validação de CPF (apenas dígitos, 11 caracteres)
         cleaned_cpf = ''.join(filter(str.isdigit, cpf))
-        if not (cleaned_cpf.isdigit() and 10 &lt;= len(cleaned_cpf) &lt;= 11): # Corrigido &lt;=
+        if not (cleaned_cpf.isdigit() and 11 <= len(cleaned_cpf) <= 11):  # Corrigido: <= correto
             flash('CPF inválido. Deve conter 11 dígitos.', 'error')
             return render_template('registro.html')
 
         # Validação de Telefone (apenas dígitos, 10 ou 11 caracteres)
         cleaned_telefone = ''.join(filter(str.isdigit, telefone))
-        if not (cleaned_telefone.isdigit() and 10 &lt;= len(cleaned_telefone) &lt;= 11): # Corrigido &lt;=
+        if not (cleaned_telefone.isdigit() and 10 <= len(cleaned_telefone) <= 11):  # Corrigido: <= correto
             flash('Telefone inválido. Deve conter 10 ou 11 dígitos.', 'error')
             return render_template('registro.html')
 
@@ -424,23 +440,27 @@ def login():
         senha = request.form['senha']
 
         conn = get_db_connection()
-        user = conn.execute('SELECT * FROM usuarios WHERE email = ?', (email,)).fetchone()
-        conn.close()
-
-        if user:
-            # Verifica a senha
-            senha_hash = hashlib.sha256(senha.encode()).hexdigest()
-            if user['senha_hash'] == senha_hash:
-                session['user_id'] = user['id']
-                session['user_name'] = user['nome']
-                session['is_admin'] = user['is_admin']
-                flash('Login realizado com sucesso!', 'success')
-                logging.info(f'Usuário logado: {email}')
-                return redirect(url_for('home'))
+        try:
+            user = conn.execute('SELECT * FROM usuarios WHERE email = ?', (email,)).fetchone()
+            if user:
+                # Verifica a senha
+                senha_hash = hashlib.sha256(senha.encode()).hexdigest()
+                if user['senha_hash'] == senha_hash:
+                    session['user_id'] = user['id']
+                    session['user_name'] = user['nome']
+                    session['is_admin'] = user['is_admin']
+                    flash('Login realizado com sucesso!', 'success')
+                    logging.info(f'Usuário logado: {email}')
+                    return redirect(url_for('home'))
+                else:
+                    flash('Senha incorreta.', 'error')
             else:
-                flash('Senha incorreta.', 'error')
-        else:
-            flash('Email não encontrado.', 'error')
+                flash('Email não encontrado.', 'error')
+        except Exception as e:
+            flash('Erro ao fazer login. Tente novamente.', 'error')
+            logging.error(f'Erro no login: {e}')
+        finally:
+            conn.close()
     return render_template('login.html')
 
 @app.route('/logout')
@@ -481,10 +501,10 @@ def reservar(car_id):
             hora_fim = datetime.strptime(hora_fim_str, '%H:%M').time()
 
             # Validação de data e hora
-            if data_reserva &lt; datetime.now().date():
+            if data_reserva < datetime.now().date():
                 flash('Não é possível reservar para uma data passada.', 'error')
                 return render_template('reservar.html', car=car)
-            if data_reserva == datetime.now().date() and hora_inicio &lt; datetime.now().time():
+            if data_reserva == datetime.now().date() and hora_inicio < datetime.now().time():
                 flash('Não é possível reservar para um horário passado no dia de hoje.', 'error')
                 return render_template('reservar.html', car=car)
             if hora_inicio >= hora_fim:
@@ -518,23 +538,28 @@ def minhas_reservas():
         flash('Você precisa estar logado para ver suas reservas.', 'warning')
         return redirect(url_for('login'))
 
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''SELECT 
-                    r.id, 
-                    c.modelo as carro_modelo, 
-                    r.data_reserva, 
-                    r.hora_inicio, 
-                    r.hora_fim, 
-                    r.status,
-                    r.observacoes
-                 FROM reservas r 
-                 JOIN carros c ON r.carro_id = c.id 
-                 WHERE r.usuario_id = ? 
-                 ORDER BY r.data_reserva DESC''', (session['user_id'],))
-    reservas = c.fetchall()
-    conn.close()
-    return render_template('minhas_reservas.html', reservas=reservas)
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''SELECT 
+                        r.id, 
+                        c.modelo as carro_modelo, 
+                        r.data_reserva, 
+                        r.hora_inicio, 
+                        r.hora_fim, 
+                        r.status,
+                        r.observacoes
+                     FROM reservas r 
+                     JOIN carros c ON r.carro_id = c.id 
+                     WHERE r.usuario_id = ? 
+                     ORDER BY r.data_reserva DESC''', (session['user_id'],))
+        reservas = c.fetchall()
+        conn.close()
+        return render_template('minhas_reservas.html', reservas=reservas)
+    except Exception as e:
+        flash('Erro ao carregar suas reservas.', 'error')
+        logging.error(f'Erro ao carregar minhas reservas: {e}')
+        return render_template('minhas_reservas.html', reservas=[])
 
 @app.route('/cancelar_reserva/<int:reserva_id>')
 def cancelar_reserva(reserva_id):
@@ -544,14 +569,13 @@ def cancelar_reserva(reserva_id):
         return redirect(url_for('login'))
 
     conn = get_db_connection()
-    reserva = conn.execute('SELECT * FROM reservas WHERE id = ? AND usuario_id = ?', (reserva_id, session['user_id'])).fetchone()
-
-    if not reserva:
-        flash('Reserva não encontrada ou você não tem permissão para cancelá-la.', 'error')
-        conn.close()
-        return redirect(url_for('minhas_reservas'))
-
     try:
+        reserva = conn.execute('SELECT * FROM reservas WHERE id = ? AND usuario_id = ?', (reserva_id, session['user_id'])).fetchone()
+
+        if not reserva:
+            flash('Reserva não encontrada ou você não tem permissão para cancelá-la.', 'error')
+            return redirect(url_for('minhas_reservas'))
+
         conn.execute('UPDATE reservas SET status = ? WHERE id = ?', ('cancelada', reserva_id))
         conn.execute('UPDATE carros SET disponivel = TRUE WHERE id = ?', (reserva['carro_id'],))
         conn.commit()
@@ -853,44 +877,4 @@ def admin_restore_backup():
                 
                 # Restaura reservas
                 for reserva_data in backup_data.get('reservas', []):
-                    c.execute('INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                              (reserva_data['id'], reserva_data['usuario_id'], reserva_data['carro_id'], reserva_data['data_reserva'], reserva_data['hora_inicio'], reserva_data['hora_fim'], reserva_data['status'], reserva_data['observacoes']))
-                
-                conn.commit()
-                conn.close()
-                flash('Banco de dados restaurado com sucesso a partir do backup!', 'success')
-                logging.info(f"DB restaurado: {len(backup_data.get('reservas', []))} reservas, {len(backup_data.get('usuarios', []))} usuários, {len(backup_data.get('carros', []))} carros.")
-                
-                # Sincroniza com Sheets após restauração
-                sync_usuarios_to_sheets()
-                sync_carros_to_sheets()
-                sync_reservas_to_sheets()
-
-            except json.JSONDecodeError:
-                flash('Arquivo de backup inválido: não é um JSON válido.', 'error')
-                logging.error('Arquivo de backup inválido: JSONDecodeError.')
-            except sqlite3.Error as e:
-                flash(f'Erro ao restaurar banco de dados: {e}', 'error')
-                logging.error(f'Erro SQLite ao restaurar DB: {e}')
-            except Exception as e:
-                flash(f'Erro inesperado ao restaurar backup: {e}', 'error')
-                logging.error(f'Erro inesperado ao restaurar backup: {e}')
-        else:
-            flash('Por favor, selecione um arquivo JSON válido.', 'error')
-    return redirect(url_for('admin_panel'))
-
-# --- Tratamento de Erros ---
-@app.errorhandler(500)
-def internal_server_error(e):
-    """Manipulador de erro para 500 Internal Server Error."""
-    logging.exception('Ocorreu um erro interno no servidor.')
-    flash('Ocorreu um erro inesperado no servidor. Por favor, tente novamente mais tarde.', 'error')
-    return render_template('error.html', error_message='Erro Interno do Servidor'), 500
-
-@app.errorhandler(404)
-def page_not_found(e):
-    """Manipulador de erro para 404 Not Found."""
-    return render_template('error.html', error_message='Página não encontrada'), 404
-
-if __name__ == '__main__':
-    app.run(debug=True)
+                    c.execute('INSERT INTO reservas (id
