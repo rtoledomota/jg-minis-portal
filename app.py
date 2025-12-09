@@ -10,10 +10,12 @@ import hashlib
 # Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Tenta importar google-auth e gspread, com fallback para erro se não estiver disponível
+# --- Gspread Import e Configuração ---
+gspread_available = False
 try:
     from google.oauth2.service_account import Credentials
     import gspread
+    gspread_available = True
     logging.info('gspread: google-auth e gspread importados com sucesso.')
 except ImportError:
     logging.error('gspread: As bibliotecas google-auth ou gspread não foram encontradas. As funcionalidades de sincronização com Google Sheets não estarão disponíveis.')
@@ -21,12 +23,135 @@ except ImportError:
     gspread = None
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.20') # Chave secreta para sessões
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_jgminis_v4.3.21') # Chave secreta para sessões
 
 # Caminho do banco de dados (persistente no Railway via /tmp)
 DATABASE_PATH = os.environ.get('DATABASE_PATH', '/tmp/jgminis.db')
 
+# Google Sheets Config
+GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', 'SUA_SHEET_ID_AQUI')
+gspread_client = None
+
+def init_gspread_client():
+    """Inicializa o cliente gspread para acesso às planilhas."""
+    global gspread_client
+    if gspread_client:
+        return gspread_client # Retorna cliente existente se já inicializado
+
+    if not gspread_available:
+        logging.warning('gspread: Bibliotecas gspread ou google-auth não disponíveis. Sincronização com Sheets desativada.')
+        return None
+
+    if GOOGLE_SHEET_ID == 'SUA_SHEET_ID_AQUI':
+        logging.error('gspread: GOOGLE_SHEET_ID não configurado. Sincronização com Sheets desativada.')
+        return None
+
+    try:
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        
+        # Tenta carregar credenciais da variável de ambiente (recomendado no Railway)
+        if os.environ.get('GOOGLE_CREDENTIALS_JSON'):
+            creds_dict = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
+            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+            logging.info('gspread: Credenciais carregadas da variável de ambiente.')
+        else:
+            logging.error('gspread: Variável GOOGLE_CREDENTIALS_JSON não encontrada. Sincronização com Sheets desativada.')
+            return None
+            
+        gspread_client = gspread.authorize(creds)
+        logging.info('gspread: Autenticação bem-sucedida.')
+        return gspread_client
+    except Exception as e:
+        logging.error(f'gspread: Erro na autenticação gspread: {e}. Sincronização com Sheets desativada.')
+        return None
+
 # --- Funções de Banco de Dados ---
+def get_db_connection():
+    """Retorna uma conexão com o banco de dados."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row # Permite acessar colunas por nome
+    return conn
+
+def load_from_sheets():
+    """Carrega dados das planilhas Google para o DB SQLite na inicialização."""
+    client = init_gspread_client()
+    if not client:
+        logging.warning("load_from_sheets: Cliente gspread não inicializado. Carregando dados apenas do DB local.")
+        return
+
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    try:
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+
+        # Carregar Usuários
+        try:
+            users_sheet = spreadsheet.worksheet('Usuarios')
+            users_data = users_sheet.get_all_records()
+            if users_data:
+                c.execute('DELETE FROM usuarios') # Limpa DB para carregar da planilha
+                for row in users_data:
+                    c.execute('''INSERT INTO usuarios (id, nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                              (row.get('ID'), row.get('Nome'), row.get('Email'), row.get('Senha_hash'),
+                               row.get('CPF'), row.get('Telefone'), row.get('Data Cadastro'),
+                               True if row.get('Admin', '').lower() == 'sim' else False))
+                logging.info(f"load_from_sheets: {len(users_data)} usuários carregados da planilha.")
+            else:
+                logging.info("load_from_sheets: Nenhuma linha encontrada na aba 'Usuarios'.")
+        except gspread.exceptions.WorksheetNotFound:
+            logging.error("load_from_sheets: Aba 'Usuarios' não encontrada na planilha. Verifique o nome da aba.")
+        except Exception as e:
+            logging.error(f"load_from_sheets: Erro ao carregar usuários da planilha: {e}")
+
+        # Carregar Carros
+        try:
+            cars_sheet = spreadsheet.worksheet('Carros')
+            cars_data = cars_sheet.get_all_records()
+            if cars_data:
+                c.execute('DELETE FROM carros') # Limpa DB para carregar da planilha
+                for row in cars_data:
+                    c.execute('''INSERT INTO carros (id, modelo, ano, cor, placa, disponivel, preco_diaria, thumbnail_url)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                              (row.get('ID'), row.get('Modelo'), row.get('Ano'), row.get('Cor'),
+                               row.get('Placa'), True if row.get('Disponivel', '').lower() == 'sim' else False,
+                               row.get('Preco Diaria'), row.get('thumbnail_url')))
+                logging.info(f"load_from_sheets: {len(cars_data)} carros carregados da planilha.")
+            else:
+                logging.info("load_from_sheets: Nenhuma linha encontrada na aba 'Carros'.")
+        except gspread.exceptions.WorksheetNotFound:
+            logging.error("load_from_sheets: Aba 'Carros' não encontrada na planilha. Verifique o nome da aba.")
+        except Exception as e:
+            logging.error(f"load_from_sheets: Erro ao carregar carros da planilha: {e}")
+
+        # Carregar Reservas
+        try:
+            reservas_sheet = spreadsheet.worksheet('Reservas')
+            reservas_data = reservas_sheet.get_all_records()
+            if reservas_data:
+                c.execute('DELETE FROM reservas') # Limpa DB para carregar da planilha
+                for row in reservas_data:
+                    c.execute('''INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes)
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                              (row.get('ID'), row.get('Usuario_id'), row.get('Carro_id'), row.get('Data Reserva'),
+                               row.get('Hora Inicio'), row.get('Hora Fim'), row.get('Status'), row.get('Observacoes')))
+                logging.info(f"load_from_sheets: {len(reservas_data)} reservas carregadas da planilha.")
+            else:
+                logging.info("load_from_sheets: Nenhuma linha encontrada na aba 'Reservas'.")
+        except gspread.exceptions.WorksheetNotFound:
+            logging.error("load_from_sheets: Aba 'Reservas' não encontrada na planilha. Verifique o nome da aba.")
+        except Exception as e:
+            logging.error(f"load_from_sheets: Erro ao carregar reservas da planilha: {e}")
+
+        conn.commit()
+    except gspread.exceptions.SpreadsheetNotFound:
+        logging.error(f"load_from_sheets: Planilha com ID '{GOOGLE_SHEET_ID}' não encontrada. Verifique o ID e permissões.")
+    except Exception as e:
+        logging.error(f"load_from_sheets: Erro geral ao carregar dados das planilhas: {e}")
+    finally:
+        conn.close()
+
 def init_db():
     """Inicializa o banco de dados SQLite, criando tabelas se não existirem."""
     conn = None
@@ -74,33 +199,35 @@ def init_db():
 
         conn.commit()
 
-        # Verifica contagens existentes para logs
-        c.execute('SELECT COUNT(*) FROM reservas')
-        reservas_count = c.fetchone()[0]
-        if reservas_count == 0:
-            logging.warning('DB inicializado: 0 reservas encontradas. Considere restaurar de um backup JSON ou sincronizar do Sheets.')
-        else:
-            logging.info(f'DB inicializado: {reservas_count} reservas preservadas.')
+        # Carrega dados da planilha para o DB
+        load_from_sheets()
 
+        # Verifica e cria admin padrão se não houver usuários (após carregar da planilha)
         c.execute('SELECT COUNT(*) FROM usuarios')
         usuarios_count = c.fetchone()[0]
         if usuarios_count == 0:
             logging.warning('DB inicializado: 0 usuários encontrados. Criando usuário admin padrão.')
-            # Cria admin padrão se nenhum usuário existir
             senha_hash = hashlib.sha256('admin123'.encode()).hexdigest()
             c.execute('INSERT INTO usuarios (nome, email, senha_hash, is_admin) VALUES (?, ?, ?, ?)',
                       ('Admin Padrão', 'admin@jgminis.com.br', senha_hash, True))
             conn.commit()
             logging.info('DB inicializado: Usuário admin padrão criado (admin@jgminis.com.br, senha: admin123).')
         else:
-            logging.info(f'DB inicializado: {usuarios_count} cadastros preservados.')
+            logging.info(f'DB inicializado: {usuarios_count} usuários preservados/carregados.')
 
         c.execute('SELECT COUNT(*) FROM carros')
         carros_count = c.fetchone()[0]
         if carros_count == 0:
-            logging.warning('DB inicializado: 0 carros encontrados. Adicione carros, restaure de um backup JSON ou sincronize do Sheets.')
+            logging.warning('DB inicializado: 0 carros encontrados. Adicione carros via painel admin ou planilha.')
         else:
-            logging.info(f'DB inicializado: {carros_count} carros preservados.')
+            logging.info(f'DB inicializado: {carros_count} carros preservados/carregados.')
+
+        c.execute('SELECT COUNT(*) FROM reservas')
+        reservas_count = c.fetchone()[0]
+        if reservas_count == 0:
+            logging.warning('DB inicializado: 0 reservas encontradas.')
+        else:
+            logging.info(f'DB inicializado: {reservas_count} reservas preservadas/carregadas.')
 
         logging.info('App bootado com sucesso.')
     except sqlite3.Error as e:
@@ -109,11 +236,8 @@ def init_db():
         if conn:
             conn.close()
 
-def get_db_connection():
-    """Retorna uma conexão com o banco de dados."""
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row # Permite acessar colunas por nome
-    return conn
+# Inicializa o DB no nível do módulo para garantir que esteja pronto para Gunicorn
+init_db()
 
 def get_user_by_id(user_id):
     """Busca um usuário pelo ID."""
@@ -142,8 +266,6 @@ def get_all_cars():
         conn = get_db_connection()
         cars = conn.execute('SELECT * FROM carros').fetchall()
         conn.close()
-        if len(cars) == 0:
-            logging.info('DB vazio: 0 carros encontrados.')
         return cars
     except Exception as e:
         logging.error(f"Erro ao carregar carros: {e}")
@@ -154,25 +276,22 @@ def get_reservas():
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute('''SELECT
-                        r.id,
-                        u.nome as usuario_nome,
-                        c.modelo as carro_modelo,
-                        r.data_reserva,
-                        r.hora_inicio,
-                        r.hora_fim,
+        c.execute('''SELECT 
+                        r.id, 
+                        u.nome as usuario_nome, 
+                        c.modelo as carro_modelo, 
+                        r.data_reserva, 
+                        r.hora_inicio, 
+                        r.hora_fim, 
                         r.status,
-                        r.observacoes,
-                        c.thumbnail_url as carro_thumbnail
-                     FROM reservas r
-                     JOIN usuarios u ON r.usuario_id = u.id
-                     JOIN carros c ON r.carro_id = c.id
+                        r.usuario_id,
+                        r.carro_id,
+                        r.observacoes
+                     FROM reservas r 
+                     JOIN usuarios u ON r.usuario_id = u.id 
+                     JOIN carros c ON r.carro_id = c.id 
                      ORDER BY r.data_reserva DESC''')
         reservas = c.fetchall()
-        if len(reservas) == 0:
-            logging.info('DB vazio: 0 reservas encontradas.')
-        else:
-            logging.info(f'Reservas: Encontradas {len(reservas)} registros no DB.')
         conn.close()
         return reservas
     except Exception as e:
@@ -185,10 +304,6 @@ def get_usuarios():
         conn = get_db_connection()
         usuarios = conn.execute('SELECT * FROM usuarios').fetchall()
         conn.close()
-        if len(usuarios) == 0:
-            logging.info('DB vazio: 0 usuários encontrados.')
-        else:
-            logging.info(f'Usuários: Encontrados {len(usuarios)} registros no DB.')
         return usuarios
     except Exception as e:
         logging.error(f"Erro ao carregar usuários: {e}")
@@ -202,259 +317,174 @@ def is_admin():
         return user and user['is_admin']
     return False
 
-# --- Funções de Integração com Google Sheets (gspread) ---
-gspread_client = None
-
-def init_gspread_client():
-    """Inicializa o cliente gspread para acesso às planilhas."""
-    global gspread_client
-    if gspread_client:
-        return gspread_client # Retorna cliente existente se já inicializado
-
-    if not gspread or not Credentials:
-        logging.warning('gspread: Bibliotecas gspread ou google-auth não disponíveis. Sincronização com Sheets desativada.')
-        return None
-
-    try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        
-        # Tenta carregar credenciais da variável de ambiente (recomendado no Railway)
-        if os.environ.get('GOOGLE_CREDENTIALS_JSON'):
-            creds_dict = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
-            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-            logging.info('gspread: Credenciais carregadas da variável de ambiente.')
-        # Fallback para arquivo service_account.json
-        elif os.path.exists('service_account.json'):
-            creds = Credentials.from_service_account_file('service_account.json', scopes=scope)
-            logging.info('gspread: Credenciais carregadas do arquivo service_account.json.')
-        else:
-            logging.error('gspread: Nenhuma credencial encontrada (variável de ambiente ou arquivo). Sincronização com Sheets desativada.')
-            return None
-            
-        gspread_client = gspread.authorize(creds)
-        logging.info('gspread: Autenticação bem-sucedida.')
-        return gspread_client
-    except Exception as e:
-        logging.error(f'gspread: Erro na autenticação gspread: {e}. Sincronização com Sheets desativada.')
-        return None
-
-# Inicializa o cliente gspread no nível do módulo
-gspread_client = init_gspread_client()
-
-# Substitua 'SUA_SHEET_ID' pela ID real da sua planilha do Google Sheets
-GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', 'SUA_SHEET_ID_AQUI') 
-
-def sync_reservas_to_sheets():
-    """Sincroniza as reservas do DB para a aba 'Reservas' do Google Sheets."""
-    if not gspread_client:
-        logging.warning('Sync reservas pulado: Cliente gspread não inicializado ou credenciais ausentes.')
-        return
-
-    if GOOGLE_SHEET_ID == 'SUA_SHEET_ID_AQUI':
-        logging.warning('Sync reservas pulado: GOOGLE_SHEET_ID não configurado. Por favor, defina a variável de ambiente.')
-        return
-
-    try:
-        sheet = gspread_client.open_by_key(GOOGLE_SHEET_ID).worksheet('Reservas')
-        sheet.clear() # Limpa a aba existente
-
-        reservas = get_reservas()
-        if reservas:
-            # Cabeçalhos na ordem desejada
-            headers = ['ID', 'Usuário', 'Carro', 'Data', 'Hora Início', 'Hora Fim', 'Status', 'Observacoes', 'Carro Thumbnail']
-            # Mapeia os dados da tupla para a ordem dos cabeçalhos
-            data_to_append = [
-                [
-                    str(r['id']),
-                    str(r['usuario_nome']),
-                    str(r['carro_modelo']),
-                    str(r['data_reserva']),
-                    str(r['hora_inicio']),
-                    str(r['hora_fim']),
-                    str(r['status']),
-                    str(r['observacoes'] or ''),
-                    str(r['carro_thumbnail'] or '')
-                ] for r in reservas
-            ]
-            sheet.append_rows([headers] + data_to_append)
-            logging.info(f'Sync reservas: {len(reservas)} registros sincronizados com o Google Sheets.')
-        else:
-            sheet.append_rows([['ID', 'Usuário', 'Carro', 'Data', 'Hora Início', 'Hora Fim', 'Status', 'Observacoes', 'Carro Thumbnail']])
-            logging.info('Sync reservas: Nenhuma reserva para sincronizar. Aba limpa e cabeçalhos adicionados.')
-    except Exception as e:
-        logging.error(f'Erro na sincronização de reservas com Google Sheets: {e}')
-        flash('Erro ao sincronizar reservas com o Google Sheets.', 'error')
-
-def sync_usuarios_to_sheets():
-    """Sincroniza os usuários do DB para a aba 'Usuarios' do Google Sheets."""
-    if not gspread_client:
-        logging.warning('Sync usuários pulado: Cliente gspread não inicializado ou credenciais ausentes.')
-        return
-
-    if GOOGLE_SHEET_ID == 'SUA_SHEET_ID_AQUI':
-        logging.warning('Sync usuários pulado: GOOGLE_SHEET_ID não configurado. Por favor, defina a variável de ambiente.')
-        return
-
-    try:
-        sheet = gspread_client.open_by_key(GOOGLE_SHEET_ID).worksheet('Usuarios')
-        sheet.clear()
-
-        usuarios = get_usuarios()
-        if usuarios:
-            headers = ['ID', 'Nome', 'Email', 'Senha_hash', 'CPF', 'Telefone', 'Data Cadastro', 'Admin']
-            data_to_append = [
-                [
-                    str(u['id']),
-                    str(u['nome']),
-                    str(u['email']),
-                    str(u['senha_hash']), # Não expor senhas em produção, apenas para debug/backup
-                    str(u['cpf'] or ''),
-                    str(u['telefone'] or ''),
-                    str(u['data_cadastro']),
-                    'Sim' if u['is_admin'] else 'Não'
-                ] for u in usuarios
-            ]
-            sheet.append_rows([headers] + data_to_append)
-            logging.info(f'Sync usuários: {len(usuarios)} registros sincronizados com o Google Sheets.')
-        else:
-            sheet.append_rows([['ID', 'Nome', 'Email', 'Senha_hash', 'CPF', 'Telefone', 'Data Cadastro', 'Admin']])
-            logging.info('Sync usuários: Nenhum usuário para sincronizar. Aba limpa e cabeçalhos adicionados.')
-    except Exception as e:
-        logging.error(f'Erro na sincronização de usuários com Google Sheets: {e}')
-        flash('Erro ao sincronizar usuários com o Google Sheets.', 'error')
-
-def sync_carros_to_sheets():
-    """Sincroniza os carros do DB para a aba 'Carros' do Google Sheets."""
-    if not gspread_client:
-        logging.warning('Sync carros pulado: Cliente gspread não inicializado ou credenciais ausentes.')
-        return
-
-    if GOOGLE_SHEET_ID == 'SUA_SHEET_ID_AQUI':
-        logging.warning('Sync carros pulado: GOOGLE_SHEET_ID não configurado. Por favor, defina a variável de ambiente.')
-        return
-
-    try:
-        sheet = gspread_client.open_by_key(GOOGLE_SHEET_ID).worksheet('Carros')
-        sheet.clear()
-
-        carros = get_all_cars()
-        if carros:
-            headers = ['ID', 'Modelo', 'Ano', 'Cor', 'Placa', 'Disponivel', 'Preco Diaria', 'thumbnail_url']
-            data_to_append = [
-                [
-                    str(c['id']),
-                    str(c['modelo']),
-                    str(c['ano']),
-                    str(c['cor']),
-                    str(c['placa']),
-                    'Sim' if c['disponivel'] else 'Não',
-                    f"{c['preco_diaria']:.2f}",
-                    str(c['thumbnail_url'] or '')
-                ] for c in carros
-            ]
-            sheet.append_rows([headers] + data_to_append)
-            logging.info(f'Sync carros: {len(carros)} registros sincronizados com o Google Sheets.')
-        else:
-            sheet.append_rows([['ID', 'Modelo', 'Ano', 'Cor', 'Placa', 'Disponivel', 'Preco Diaria', 'thumbnail_url']])
-            logging.info('Sync carros: Nenhum carro para sincronizar. Aba limpa e cabeçalhos adicionados.')
-    except Exception as e:
-        logging.error(f'Erro na sincronização de carros com Google Sheets: {e}')
-        flash('Erro ao sincronizar carros com o Google Sheets.', 'error')
-
-def load_from_sheets():
-    """Carrega dados das planilhas Google Sheets para o banco de dados SQLite."""
-    if not gspread_client:
-        logging.warning('Load from Sheets pulado: Cliente gspread não inicializado ou credenciais ausentes.')
-        return
-
-    if GOOGLE_SHEET_ID == 'SUA_SHEET_ID_AQUI':
-        logging.warning('Load from Sheets pulado: GOOGLE_SHEET_ID não configurado. Por favor, defina a variável de ambiente.')
+# --- Funções de Sincronização com Google Sheets ---
+def sync_to_sheets():
+    """Sincroniza dados do DB SQLite para as planilhas Google."""
+    client = init_gspread_client()
+    if not client:
+        logging.warning("sync_to_sheets: Cliente gspread não inicializado. Sincronização para Sheets desativada.")
         return
 
     conn = get_db_connection()
-    c = conn.cursor()
     try:
-        spreadsheet = gspread_client.open_by_key(GOOGLE_SHEET_ID)
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
 
-        # Carregar Carros
+        # Sincronizar Usuários
         try:
-            carros_sheet = spreadsheet.worksheet('Carros')
-            carros_data = carros_sheet.get_all_records()
-            if carros_data:
-                c.execute('DELETE FROM carros') # Limpa antes de carregar
-                for car in carros_data:
-                    c.execute('INSERT INTO carros (id, modelo, ano, cor, placa, disponivel, preco_diaria, thumbnail_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                              (car.get('ID'), car.get('Modelo'), car.get('Ano'), car.get('Cor'), car.get('Placa'),
-                               car.get('Disponivel') == 'Sim', car.get('Preco Diaria'), car.get('thumbnail_url')))
-                logging.info(f'Sheets: {len(carros_data)} carros carregados da planilha.')
+            users_sheet = spreadsheet.worksheet('Usuarios')
+            users_sheet.clear()
+            usuarios = get_usuarios()
+            if usuarios:
+                headers = ['ID', 'Nome', 'Email', 'Senha_hash', 'CPF', 'Telefone', 'Data Cadastro', 'Admin']
+                data_to_append = [
+                    [
+                        u['id'], u['nome'], u['email'], u['senha_hash'],
+                        u['cpf'], u['telefone'], u['data_cadastro'],
+                        'Sim' if u['is_admin'] else 'Não'
+                    ] for u in usuarios
+                ]
+                users_sheet.append_rows([headers] + data_to_append)
+                logging.info(f'sync_to_sheets: {len(usuarios)} usuários sincronizados para o Google Sheets.')
             else:
-                logging.info('Sheets: Nenhuma dado na aba Carros.')
+                users_sheet.append_rows([['ID', 'Nome', 'Email', 'Senha_hash', 'CPF', 'Telefone', 'Data Cadastro', 'Admin']])
+                logging.info('sync_to_sheets: Nenhuma usuário para sincronizar. Aba limpa e cabeçalhos adicionados.')
         except gspread.exceptions.WorksheetNotFound:
-            logging.warning('Sheets: Aba "Carros" não encontrada na planilha. Ignorando carregamento de carros.')
+            logging.error("sync_to_sheets: Aba 'Usuarios' não encontrada na planilha. Verifique o nome da aba.")
         except Exception as e:
-            logging.error(f'Sheets: Erro ao carregar carros da planilha: {e}')
+            logging.error(f'sync_to_sheets: Erro na sincronização de usuários para Google Sheets: {e}')
 
-        # Carregar Usuários
+        # Sincronizar Carros
         try:
-            usuarios_sheet = spreadsheet.worksheet('Usuarios')
-            usuarios_data = usuarios_sheet.get_all_records()
-            if usuarios_data:
-                c.execute('DELETE FROM usuarios') # Limpa antes de carregar
-                for user in usuarios_data:
-                    c.execute('INSERT INTO usuarios (id, nome, email, senha_hash, cpf, telefone, data_cadastro, is_admin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                              (user.get('ID'), user.get('Nome'), user.get('Email'), user.get('Senha_hash'),
-                               user.get('CPF'), user.get('Telefone'), user.get('Data Cadastro'), user.get('Admin') == 'Sim'))
-                logging.info(f'Sheets: {len(usuarios_data)} usuários carregados da planilha.')
+            cars_sheet = spreadsheet.worksheet('Carros')
+            cars_sheet.clear()
+            carros = get_all_cars()
+            if carros:
+                headers = ['ID', 'Modelo', 'Ano', 'Cor', 'Placa', 'Disponivel', 'Preco Diaria', 'thumbnail_url']
+                data_to_append = [
+                    [
+                        c['id'], c['modelo'], c['ano'], c['cor'], c['placa'],
+                        'Sim' if c['disponivel'] else 'Não', c['preco_diaria'], c['thumbnail_url']
+                    ] for c in carros
+                ]
+                cars_sheet.append_rows([headers] + data_to_append)
+                logging.info(f'sync_to_sheets: {len(carros)} carros sincronizados para o Google Sheets.')
             else:
-                logging.info('Sheets: Nenhuma dado na aba Usuarios.')
+                cars_sheet.append_rows([['ID', 'Modelo', 'Ano', 'Cor', 'Placa', 'Disponivel', 'Preco Diaria', 'thumbnail_url']])
+                logging.info('sync_to_sheets: Nenhum carro para sincronizar. Aba limpa e cabeçalhos adicionados.')
         except gspread.exceptions.WorksheetNotFound:
-            logging.warning('Sheets: Aba "Usuarios" não encontrada na planilha. Ignorando carregamento de usuários.')
+            logging.error("sync_to_sheets: Aba 'Carros' não encontrada na planilha. Verifique o nome da aba.")
         except Exception as e:
-            logging.error(f'Sheets: Erro ao carregar usuários da planilha: {e}')
+            logging.error(f'sync_to_sheets: Erro na sincronização de carros para Google Sheets: {e}')
 
-        # Carregar Reservas
+        # Sincronizar Reservas
         try:
             reservas_sheet = spreadsheet.worksheet('Reservas')
-            reservas_data = reservas_sheet.get_all_records()
-            if reservas_data:
-                c.execute('DELETE FROM reservas') # Limpa antes de carregar
-                for reserva in reservas_data:
-                    # Precisa buscar usuario_id e carro_id pelo nome/modelo
-                    usuario_id = conn.execute('SELECT id FROM usuarios WHERE nome = ?', (reserva.get('Usuário'),)).fetchone()
-                    carro_id = conn.execute('SELECT id FROM carros WHERE modelo = ?', (reserva.get('Carro'),)).fetchone()
-                    
-                    if usuario_id and carro_id:
-                        c.execute('INSERT INTO reservas (id, usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, status, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                                  (reserva.get('ID'), usuario_id[0], carro_id[0], reserva.get('Data'), reserva.get('Hora Início'),
-                                   reserva.get('Hora Fim'), reserva.get('Status'), reserva.get('Observacoes')))
-                    else:
-                        logging.warning(f"Sheets: Reserva ID {reserva.get('ID')} ignorada. Usuário ou Carro não encontrados no DB.")
-                logging.info(f'Sheets: {len(reservas_data)} reservas carregadas da planilha.')
+            reservas_sheet.clear()
+            reservas = get_reservas()
+            if reservas:
+                headers = ['ID', 'Usuario_id', 'Carro_id', 'Data Reserva', 'Hora Inicio', 'Hora Fim', 'Status', 'Observacoes']
+                data_to_append = [
+                    [
+                        r['id'], r['usuario_id'], r['carro_id'], r['data_reserva'],
+                        r['hora_inicio'], r['hora_fim'], r['status'], r['observacoes']
+                    ] for r in reservas
+                ]
+                reservas_sheet.append_rows([headers] + data_to_append)
+                logging.info(f'sync_to_sheets: {len(reservas)} reservas sincronizadas para o Google Sheets.')
             else:
-                logging.info('Sheets: Nenhuma dado na aba Reservas.')
+                reservas_sheet.append_rows([['ID', 'Usuario_id', 'Carro_id', 'Data Reserva', 'Hora Inicio', 'Hora Fim', 'Status', 'Observacoes']])
+                logging.info('sync_to_sheets: Nenhuma reserva para sincronizar. Aba limpa e cabeçalhos adicionados.')
         except gspread.exceptions.WorksheetNotFound:
-            logging.warning('Sheets: Aba "Reservas" não encontrada na planilha. Ignorando carregamento de reservas.')
+            logging.error("sync_to_sheets: Aba 'Reservas' não encontrada na planilha. Verifique o nome da aba.")
         except Exception as e:
-            logging.error(f'Sheets: Erro ao carregar reservas da planilha: {e}')
+            logging.error(f'sync_to_sheets: Erro na sincronização de reservas para Google Sheets: {e}')
 
-        conn.commit()
-        logging.info('Sheets: Dados carregados da planilha Google Sheets para o DB SQLite.')
+    except gspread.exceptions.SpreadsheetNotFound:
+        logging.error(f"sync_to_sheets: Planilha com ID '{GOOGLE_SHEET_ID}' não encontrada. Verifique o ID e permissões.")
     except Exception as e:
-        logging.error(f'Sheets: Erro geral ao carregar dados da planilha: {e}')
+        logging.error(f"sync_to_sheets: Erro geral ao sincronizar dados para planilhas: {e}")
     finally:
         conn.close()
 
-# Inicializa o DB e carrega dados do Sheets na inicialização do app
-init_db()
-load_from_sheets()
+# --- HTML Inline para Rotas (Self-Contained) ---
+BASE_HTML_START = """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JG Minis</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f4; color: #333; }
+        .container { width: 80%; margin: 20px auto; background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        h1, h2 { color: #0056b3; }
+        nav { background-color: #0056b3; padding: 10px 0; text-align: center; }
+        nav a { color: white; text-decoration: none; padding: 10px 15px; display: inline-block; }
+        nav a:hover { background-color: #004085; }
+        .flash { padding: 10px; margin-bottom: 10px; border-radius: 5px; }
+        .flash.success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .flash.error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .flash.warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+        .flash.info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        form { margin-top: 20px; }
+        form label { display: block; margin-bottom: 5px; font-weight: bold; }
+        form input[type="text"], form input[type="email"], form input[type="password"], form input[type="number"], form input[type="date"], form input[type="time"], form textarea {
+            width: calc(100% - 22px); padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px;
+        }
+        form input[type="submit"], .button { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        form input[type="submit"]:hover, .button:hover { background-color: #0056b3; }
+        .car-list, .user-list, .reserva-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; margin-top: 20px; }
+        .car-item, .user-item, .reserva-item { background-color: #f9f9f9; border: 1px solid #eee; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .car-item img { max-width: 100%; height: 150px; object-fit: cover; border-radius: 4px; margin-bottom: 10px; }
+        .car-item h3 { margin-top: 0; color: #007bff; }
+        .car-item p { margin: 5px 0; font-size: 0.9em; }
+        .car-item .price { font-weight: bold; color: #28a745; font-size: 1.1em; }
+        .admin-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        .admin-table th, .admin-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        .admin-table th { background-color: #f2f2f2; }
+        .admin-actions a { margin-right: 10px; color: #007bff; text-decoration: none; }
+        .admin-actions a:hover { text-decoration: underline; }
+        .admin-actions button { background-color: #dc3545; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
+        .admin-actions button:hover { background-color: #c82333; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { margin-bottom: 5px; }
+        .form-group input[type="checkbox"] { margin-right: 5px; }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="/">Home</a>
+        <a href="/registro">Registro</a>
+        {nav_auth_link}
+        {admin_link}
+    </nav>
+    <div class="container">
+        {flash_messages}
+"""
 
-# Rota de saúde para Railway (retorna OK se app vivo)
+BASE_HTML_END = """
+    </div>
+</body>
+</html>
+"""
+
+def get_nav_links():
+    nav_auth_link = f'<a href="/logout">Logout ({session.get("user_name", "")})</a>' if 'user_id' in session else '<a href="/login">Login</a>'
+    admin_link = '<a href="/admin">Admin</a>' if is_admin() else ''
+    return nav_auth_link, admin_link
+
+def get_flash_messages():
+    messages = ""
+    for category, msg in session.pop('_flashes', []):
+        messages += f'<div class="flash {category}">{msg}</div>'
+    return messages
+
+# --- Rotas ---
 @app.route('/health')
 def health():
     """Endpoint de saúde para verificação do Railway."""
     return 'OK', 200
 
-# --- Rotas ---
 @app.route('/')
 def index():
     """Redireciona para a página inicial."""
@@ -463,131 +493,41 @@ def index():
 @app.route('/home')
 def home():
     """Página inicial com lista de carros disponíveis."""
-    try:
-        carros = get_all_cars()
-        
-        # HTML inline para a página home
-        html_content = """
-        <!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>JG Minis - Home</title>
-            <style>
-                body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; }
-                .container { max-width: 1200px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-                h1 { color: #0056b3; text-align: center; margin-bottom: 30px; }
-                .car-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
-                .car-card { background: #f9f9f9; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; text-align: center; padding-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-                .car-card img { width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid #eee; }
-                .car-card h2 { font-size: 1.2em; margin: 15px 0 5px; color: #333; }
-                .car-card p { font-size: 0.9em; color: #666; margin: 5px 10px; }
-                .car-card .price { font-size: 1.1em; color: #007bff; font-weight: bold; margin: 10px 0; }
-                .car-card a { display: inline-block; background-color: #007bff; color: white; padding: 8px 15px; border-radius: 5px; text-decoration: none; margin-top: 10px; }
-                .car-card a:hover { background-color: #0056b3; }
-                .message { text-align: center; padding: 20px; background-color: #e9ecef; border-radius: 5px; margin-top: 20px; }
-                .navbar { background-color: #007bff; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }
-                .navbar a { color: white; text-decoration: none; padding: 8px 15px; border-radius: 5px; }
-                .navbar a:hover { background-color: #0056b3; }
-                .navbar .logo { font-weight: bold; font-size: 1.5em; }
-                .flash-messages { list-style: none; padding: 0; margin: 20px 0; }
-                .flash-messages li { padding: 10px; margin-bottom: 10px; border-radius: 5px; }
-                .flash-messages .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-                .flash-messages .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-                .flash-messages .info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-                .admin-link { background-color: #28a745; margin-left: 10px; }
-                .admin-link:hover { background-color: #218838; }
-            </style>
-        </head>
-        <body>
-            <div class="navbar">
-                <a href="/" class="logo">JG Minis</a>
-                <div>
-                    <a href="/home">Home</a>
-                    """
-        if 'user_id' in session:
-            html_content += f"""
-                    <a href="/minhas_reservas">Minhas Reservas</a>
-                    <a href="/logout">Logout ({session.get('user_name', 'Usuário')})</a>
-                    """
-            if is_admin():
-                html_content += """
-                    <a href="/admin" class="admin-link">Admin</a>
-                    """
-        else:
-            html_content += """
-                    <a href="/login">Login</a>
-                    <a href="/registro">Registro</a>
-                    """
-        html_content += """
-                </div>
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+    
+    carros = get_all_cars()
+    car_items_html = ""
+    if carros:
+        for car in carros:
+            car_items_html += f"""
+            <div class="car-item">
+                <h3>{car['modelo']} ({car['ano']})</h3>
+                {f'<img src="{car["thumbnail_url"]}" alt="{car["modelo"]}" />' if car['thumbnail_url'] else ''}
+                <p>Cor: {car['cor']}</p>
+                <p>Placa: {car['placa']}</p>
+                <p class="price">R$ {car['preco_diaria']:.2f} / diária</p>
+                <p>Disponível: {'Sim' if car['disponivel'] else 'Não'}</p>
+                <a href="/reservar/{car['id']}" class="button">Reservar</a>
             </div>
-            <div class="container">
-                """
-        # Flash messages
-        if '_flashes' in session:
-            html_content += '<ul class="flash-messages">'
-            for category, message in session['_flashes']:
-                html_content += f'<li class="{category}">{message}</li>'
-            session.pop('_flashes', None) # Clear flashes after displaying
-            html_content += '</ul>'
-
-        html_content += """
-                <h1>Carros Disponíveis</h1>
-                <div class="car-grid">
-        """
-        if carros:
-            for car in carros:
-                if car['disponivel']:
-                    thumbnail_src = car['thumbnail_url'] if car['thumbnail_url'] else 'https://via.placeholder.com/300x180?text=Sem+Imagem'
-                    html_content += f"""
-                    <div class="car-card">
-                        <img src="{thumbnail_src}" alt="{car['modelo']}">
-                        <h2>{car['modelo']} - {car['ano']}</h2>
-                        <p>{car['cor']} - Placa: {car['placa']}</p>
-                        <p class="price">R$ {car['preco_diaria']:.2f} / diária</p>
-                        <a href="/reservar/{car['id']}">Reservar</a>
-                    </div>
-                    """
-        else:
-            html_content += """
-                </div>
-                <div class="message">
-                    <p>Nenhum carro disponível no momento. Por favor, adicione carros via painel administrativo.</p>
-                    <p>Se você é administrador, acesse <a href="/admin">/admin</a>.</p>
-                </div>
             """
-        html_content += """
-                </div>
-            </div>
-        </body>
-        </html>
-        """
-        return html_content
-    except Exception as e:
-        logging.error(f"Erro ao carregar a página inicial: {e}", exc_info=True)
-        flash('Erro ao carregar a lista de carros. Tente novamente mais tarde.', 'error')
-        return """
-        <!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Erro</title>
-            <style>body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }</style>
-        </head>
-        <body>
-            <h1>Ocorreu um erro!</h1>
-            <p>Não foi possível carregar a página inicial. Por favor, tente novamente mais tarde.</p>
-            <a href="/">Voltar para Home</a>
-        </body>
-        </html>
-        """
+        car_list_html = f'<div class="car-list">{car_items_html}</div>'
+    else:
+        car_list_html = '<p>Nenhum carro disponível no momento. Por favor, adicione carros via painel administrativo ou planilha.</p>'
+
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Carros Disponíveis</h2>
+        {car_list_html}
+    {BASE_HTML_END}
+    """
 
 @app.route('/registro', methods=['GET', 'POST'])
 def registro():
     """Rota para registro de novos usuários."""
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+
     if request.method == 'POST':
         nome = request.form['nome']
         email = request.form['email']
@@ -617,84 +557,57 @@ def registro():
             # Hash da senha
             senha_hash = hashlib.sha256(senha.encode()).hexdigest()
 
-            conn.execute('INSERT INTO usuarios (nome, email, senha_hash, cpf, telefone) VALUES (?, ?, ?, ?, ?)',
+            c = conn.cursor()
+            c.execute('INSERT INTO usuarios (nome, email, senha_hash, cpf, telefone) VALUES (?, ?, ?, ?, ?)',
                          (nome, email, senha_hash, cleaned_cpf, cleaned_telefone))
             conn.commit()
             flash('Registro realizado com sucesso! Faça login para continuar.', 'success')
             logging.info(f'Novo usuário registrado: {email}')
-            sync_usuarios_to_sheets() # Sincroniza após registro
+            sync_to_sheets() # Sincroniza para Sheets após registro
             return redirect(url_for('login'))
         except sqlite3.IntegrityError:
             flash('Email ou CPF já cadastrado. Tente novamente com outros dados.', 'error')
         except Exception as e:
             flash(f'Erro ao registrar usuário: {e}', 'error')
-            logging.error(f'Erro no registro de usuário: {e}', exc_info=True)
+            logging.error(f'Erro no registro de usuário: {e}')
         finally:
             conn.close()
     
-    # HTML inline para a página de registro
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>JG Minis - Registro</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
-            .form-container {{ background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }}
-            h1 {{ color: #0056b3; text-align: center; margin-bottom: 20px; }}
-            label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-            input[type="text"], input[type="email"], input[type="password"] {{ width: calc(100% - 22px); padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; }}
-            button {{ width: 100%; padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }}
-            button:hover {{ background-color: #0056b3; }}
-            .link {{ text-align: center; margin-top: 15px; }}
-            .link a {{ color: #007bff; text-decoration: none; }}
-            .link a:hover {{ text-decoration: underline; }}
-            .flash-messages {{ list-style: none; padding: 0; margin: 0 0 15px 0; }}
-            .flash-messages li {{ padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
-            .flash-messages .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-            .flash-messages .error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
-            .flash-messages .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
-        </style>
-    </head>
-    <body>
-        <div class="form-container">
-            <h1>Registro</h1>
-            """
-    if '_flashes' in session:
-        html_content += '<ul class="flash-messages">'
-        for category, message in session['_flashes']:
-            html_content += f'<li class="{category}">{message}</li>'
-        session.pop('_flashes', None)
-        html_content += '</ul>'
-
-    html_content += """
-            <form method="POST">
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Registro</h2>
+        <form method="POST" action="/registro">
+            <div class="form-group">
                 <label for="nome">Nome:</label>
                 <input type="text" id="nome" name="nome" required>
+            </div>
+            <div class="form-group">
                 <label for="email">Email:</label>
                 <input type="email" id="email" name="email" required>
+            </div>
+            <div class="form-group">
                 <label for="senha">Senha:</label>
                 <input type="password" id="senha" name="senha" required>
-                <label for="cpf">CPF (apenas números):</label>
-                <input type="text" id="cpf" name="cpf" pattern="[0-9]{11}" title="CPF deve conter 11 dígitos numéricos" required>
-                <label for="telefone">Telefone (apenas números, 10 ou 11 dígitos):</label>
-                <input type="text" id="telefone" name="telefone" pattern="[0-9]{10,11}" title="Telefone deve conter 10 ou 11 dígitos numéricos" required>
-                <button type="submit">Registrar</button>
-            </form>
-            <div class="link">
-                Já tem uma conta? <a href="/login">Faça Login</a>
             </div>
-        </div>
-    </body>
-    </html>
+            <div class="form-group">
+                <label for="cpf">CPF:</label>
+                <input type="text" id="cpf" name="cpf" placeholder="123.456.789-00" required>
+            </div>
+            <div class="form-group">
+                <label for="telefone">Telefone:</label>
+                <input type="text" id="telefone" name="telefone" placeholder="(XX) XXXXX-XXXX" required>
+            </div>
+            <input type="submit" value="Registrar">
+        </form>
+    {BASE_HTML_END}
     """
-    return html_content
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """Rota para login de usuários."""
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+
     if request.method == 'POST':
         email = request.form['email']
         senha = request.form['senha']
@@ -718,63 +631,27 @@ def login():
                 flash('Email não encontrado.', 'error')
         except Exception as e:
             flash('Erro ao fazer login. Tente novamente.', 'error')
-            logging.error(f'Erro no login: {e}', exc_info=True)
+            logging.error(f'Erro no login: {e}')
         finally:
             conn.close()
     
-    # HTML inline para a página de login
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>JG Minis - Login</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
-            .form-container {{ background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }}
-            h1 {{ color: #0056b3; text-align: center; margin-bottom: 20px; }}
-            label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-            input[type="email"], input[type="password"] {{ width: calc(100% - 22px); padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; }}
-            button {{ width: 100%; padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }}
-            button:hover {{ background-color: #0056b3; }}
-            .link {{ text-align: center; margin-top: 15px; }}
-            .link a {{ color: #007bff; text-decoration: none; }}
-            .link a:hover {{ text-decoration: underline; }}
-            .flash-messages {{ list-style: none; padding: 0; margin: 0 0 15px 0; }}
-            .flash-messages li {{ padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
-            .flash-messages .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-            .flash-messages .error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
-            .flash-messages .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
-        </style>
-    </head>
-    <body>
-        <div class="form-container">
-            <h1>Login</h1>
-            """
-    if '_flashes' in session:
-        html_content += '<ul class="flash-messages">'
-        for category, message in session['_flashes']:
-            html_content += f'<li class="{category}">{message}</li>'
-        session.pop('_flashes', None)
-        html_content += '</ul>'
-
-    html_content += """
-            <form method="POST">
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Login</h2>
+        <form method="POST" action="/login">
+            <div class="form-group">
                 <label for="email">Email:</label>
                 <input type="email" id="email" name="email" required>
+            </div>
+            <div class="form-group">
                 <label for="senha">Senha:</label>
                 <input type="password" id="senha" name="senha" required>
-                <button type="submit">Entrar</button>
-            </form>
-            <div class="link">
-                Não tem uma conta? <a href="/registro">Registre-se</a>
             </div>
-        </div>
-    </body>
-    </html>
+            <input type="submit" value="Login">
+        </form>
+        <p>Não tem uma conta? <a href="/registro">Registre-se aqui</a>.</p>
+    {BASE_HTML_END}
     """
-    return html_content
 
 @app.route('/logout')
 def logout():
@@ -789,6 +666,9 @@ def logout():
 @app.route('/reservar/<int:car_id>', methods=['GET', 'POST'])
 def reservar(car_id):
     """Rota para reservar um carro."""
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+
     if 'user_id' not in session:
         flash('Você precisa estar logado para fazer uma reserva.', 'warning')
         return redirect(url_for('login'))
@@ -825,219 +705,108 @@ def reservar(car_id):
                 return redirect(url_for('reservar', car_id=car_id))
 
             conn = get_db_connection()
-            conn.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, observacoes) VALUES (?, ?, ?, ?, ?, ?)',
+            c = conn.cursor()
+            c.execute('INSERT INTO reservas (usuario_id, carro_id, data_reserva, hora_inicio, hora_fim, observacoes) VALUES (?, ?, ?, ?, ?, ?)',
                          (session['user_id'], car_id, data_reserva, hora_inicio, hora_fim, observacoes))
-            conn.execute('UPDATE carros SET disponivel = FALSE WHERE id = ?', (car_id,))
+            c.execute('UPDATE carros SET disponivel = FALSE WHERE id = ?', (car_id,))
             conn.commit()
             conn.close()
 
             flash('Reserva realizada com sucesso!', 'success')
             logging.info(f"Reserva criada: Usuário {session['user_id']} reservou carro {car_id} para {data_reserva}")
-            sync_reservas_to_sheets() # Sincroniza após a reserva
-            sync_carros_to_sheets() # Sincroniza status do carro
+            sync_to_sheets() # Sincroniza após a reserva
             return redirect(url_for('minhas_reservas'))
         except ValueError:
             flash('Formato de data ou hora inválido.', 'error')
         except Exception as e:
             flash(f'Erro ao realizar reserva: {e}', 'error')
-            logging.error(f'Erro ao realizar reserva: {e}', exc_info=True)
+            logging.error(f'Erro ao realizar reserva: {e}')
     
-    # HTML inline para a página de reserva
-    thumbnail_src = car['thumbnail_url'] if car['thumbnail_url'] else 'https://via.placeholder.com/300x180?text=Sem+Imagem'
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>JG Minis - Reservar {car['modelo']}</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
-            .form-container {{ background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); width: 100%; max-width: 500px; }}
-            h1 {{ color: #0056b3; text-align: center; margin-bottom: 20px; }}
-            .car-details {{ text-align: center; margin-bottom: 20px; }}
-            .car-details img {{ max-width: 100%; height: auto; border-radius: 8px; margin-bottom: 10px; }}
-            .car-details h2 {{ margin: 5px 0; }}
-            .car-details p {{ margin: 2px 0; color: #666; }}
-            label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-            input[type="date"], input[type="time"], textarea {{ width: calc(100% - 22px); padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; }}
-            button {{ width: 100%; padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }}
-            button:hover {{ background-color: #0056b3; }}
-            .flash-messages {{ list-style: none; padding: 0; margin: 0 0 15px 0; }}
-            .flash-messages li {{ padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
-            .flash-messages .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-            .flash-messages .error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
-            .flash-messages .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
-        </style>
-    </head>
-    <body>
-        <div class="form-container">
-            <h1>Reservar Carro</h1>
-            """
-    if '_flashes' in session:
-        html_content += '<ul class="flash-messages">'
-        for category, message in session['_flashes']:
-            html_content += f'<li class="{category}">{message}</li>'
-        session.pop('_flashes', None)
-        html_content += '</ul>'
-
-    html_content += f"""
-            <div class="car-details">
-                <img src="{thumbnail_src}" alt="{car['modelo']}">
-                <h2>{car['modelo']} - {car['ano']}</h2>
-                <p>{car['cor']} - Placa: {car['placa']}</p>
-                <p>Preço: R$ {car['preco_diaria']:.2f} / diária</p>
-            </div>
-            <form method="POST">
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Reservar {car['modelo']}</h2>
+        <form method="POST" action="/reservar/{car['id']}">
+            <div class="form-group">
                 <label for="data_reserva">Data da Reserva:</label>
                 <input type="date" id="data_reserva" name="data_reserva" required>
+            </div>
+            <div class="form-group">
                 <label for="hora_inicio">Hora de Início:</label>
                 <input type="time" id="hora_inicio" name="hora_inicio" required>
+            </div>
+            <div class="form-group">
                 <label for="hora_fim">Hora de Fim:</label>
                 <input type="time" id="hora_fim" name="hora_fim" required>
+            </div>
+            <div class="form-group">
                 <label for="observacoes">Observações (opcional):</label>
-                <textarea id="observacoes" name="observacoes" rows="3"></textarea>
-                <button type="submit">Confirmar Reserva</button>
-            </form>
-        </div>
-    </body>
-    </html>
+                <textarea id="observacoes" name="observacoes"></textarea>
+            </div>
+            <input type="submit" value="Confirmar Reserva">
+        </form>
+    {BASE_HTML_END}
     """
-    return html_content
 
 @app.route('/minhas_reservas')
 def minhas_reservas():
     """Exibe as reservas do usuário logado."""
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+
     if 'user_id' not in session:
         flash('Você precisa estar logado para ver suas reservas.', 'warning')
         return redirect(url_for('login'))
 
+    reservas_html = ""
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute('''SELECT
-                        r.id,
-                        c.modelo as carro_modelo,
-                        r.data_reserva,
-                        r.hora_inicio,
-                        r.hora_fim,
+        c.execute('''SELECT 
+                        r.id, 
+                        c.modelo as carro_modelo, 
+                        r.data_reserva, 
+                        r.hora_inicio, 
+                        r.hora_fim, 
                         r.status,
-                        r.observacoes,
-                        c.thumbnail_url as carro_thumbnail
-                     FROM reservas r
-                     JOIN carros c ON r.carro_id = c.id
-                     WHERE r.usuario_id = ?
+                        r.observacoes
+                     FROM reservas r 
+                     JOIN carros c ON r.carro_id = c.id 
+                     WHERE r.usuario_id = ? 
                      ORDER BY r.data_reserva DESC''', (session['user_id'],))
         reservas = c.fetchall()
         conn.close()
 
-        # HTML inline para a página de minhas reservas
-        html_content = f"""
-        <!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>JG Minis - Minhas Reservas</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; }}
-                .container {{ max-width: 1200px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                h1 {{ color: #0056b3; text-align: center; margin-bottom: 30px; }}
-                .reservation-card {{ background: #f9f9f9; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 15px; padding: 15px; display: flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-                .reservation-card img {{ width: 100px; height: 60px; object-fit: cover; border-radius: 4px; margin-right: 15px; }}
-                .reservation-details {{ flex-grow: 1; }}
-                .reservation-details h2 {{ font-size: 1.1em; margin: 0 0 5px; color: #333; }}
-                .reservation-details p {{ font-size: 0.9em; color: #666; margin: 2px 0; }}
-                .reservation-actions a {{ background-color: #dc3545; color: white; padding: 8px 12px; border-radius: 5px; text-decoration: none; font-size: 0.9em; }}
-                .reservation-actions a:hover {{ background-color: #c82333; }}
-                .message {{ text-align: center; padding: 20px; background-color: #e9ecef; border-radius: 5px; margin-top: 20px; }}
-                .navbar {{ background-color: #007bff; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }}
-                .navbar a {{ color: white; text-decoration: none; padding: 8px 15px; border-radius: 5px; }}
-                .navbar a:hover {{ background-color: #0056b3; }}
-                .navbar .logo {{ font-weight: bold; font-size: 1.5em; }}
-                .flash-messages {{ list-style: none; padding: 0; margin: 20px 0; }}
-                .flash-messages li {{ padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
-                .flash-messages .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-                .flash-messages .error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
-                .flash-messages .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
-                .admin-link { background-color: #28a745; margin-left: 10px; }
-                .admin-link:hover { background-color: #218838; }
-            </style>
-        </head>
-        <body>
-            <div class="navbar">
-                <a href="/" class="logo">JG Minis</a>
-                <div>
-                    <a href="/home">Home</a>
-                    """
-        if 'user_id' in session:
-            html_content += f"""
-                    <a href="/minhas_reservas">Minhas Reservas</a>
-                    <a href="/logout">Logout ({session.get('user_name', 'Usuário')})</a>
-                    """
-            if is_admin():
-                html_content += """
-                    <a href="/admin" class="admin-link">Admin</a>
-                    """
-        else:
-            html_content += """
-                    <a href="/login">Login</a>
-                    <a href="/registro">Registro</a>
-                    """
-        html_content += """
-                </div>
-            </div>
-            <div class="container">
-                """
-        if '_flashes' in session:
-            html_content += '<ul class="flash-messages">'
-            for category, message in session['_flashes']:
-                html_content += f'<li class="{category}">{message}</li>'
-            session.pop('_flashes', None)
-            html_content += '</ul>'
-
-        html_content += """
-                <h1>Minhas Reservas</h1>
-        """
         if reservas:
-            for reserva in reservas:
-                thumbnail_src = reserva['carro_thumbnail'] if reserva['carro_thumbnail'] else 'https://via.placeholder.com/100x60?text=Sem+Imagem'
-                html_content += f"""
-                <div class="reservation-card">
-                    <img src="{thumbnail_src}" alt="{reserva['carro_modelo']}">
-                    <div class="reservation-details">
-                        <h2>{reserva['carro_modelo']}</h2>
-                        <p>Data: {reserva['data_reserva']} ({reserva['hora_inicio']} - {reserva['hora_fim']})</p>
-                        <p>Status: {reserva['status'].capitalize()}</p>
-                        <p>Obs: {reserva['observacoes'] or 'Nenhuma'}</p>
-                    </div>
-                    <div class="reservation-actions">
-                        """
-                if reserva['status'] == 'pendente':
-                    html_content += f"""
-                        <a href="/cancelar_reserva/{reserva['id']}">Cancelar</a>
-                        """
-                html_content += """
-                    </div>
-                </div>
+            reservas_html += '<table class="admin-table"><thead><tr><th>ID</th><th>Carro</th><th>Data</th><th>Início</th><th>Fim</th><th>Status</th><th>Observações</th><th>Ações</th></tr></thead><tbody>'
+            for r in reservas:
+                reservas_html += f"""
+                <tr>
+                    <td>{r['id']}</td>
+                    <td>{r['carro_modelo']}</td>
+                    <td>{r['data_reserva']}</td>
+                    <td>{r['hora_inicio']}</td>
+                    <td>{r['hora_fim']}</td>
+                    <td>{r['status']}</td>
+                    <td>{r['observacoes'] or ''}</td>
+                    <td>
+                        {f'<a href="/cancelar_reserva/{r["id"]}">Cancelar</a>' if r['status'] == 'pendente' else ''}
+                    </td>
+                </tr>
                 """
+            reservas_html += '</tbody></table>'
         else:
-            html_content += """
-                <div class="message">
-                    <p>Você não possui nenhuma reserva.</p>
-                    <p><a href="/home">Ver carros disponíveis</a></p>
-                </div>
-            """
-        html_content += """
-            </div>
-        </body>
-        </html>
-        """
-        return html_content
+            reservas_html = '<p>Você não possui nenhuma reserva.</p>'
     except Exception as e:
         flash('Erro ao carregar suas reservas.', 'error')
-        logging.error(f'Erro ao carregar minhas reservas: {e}', exc_info=True)
-        return redirect(url_for('home'))
+        logging.error(f'Erro ao carregar minhas reservas: {e}')
+        reservas_html = '<p>Erro ao carregar reservas.</p>'
+    
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Minhas Reservas</h2>
+        {reservas_html}
+    {BASE_HTML_END}
+    """
 
 @app.route('/cancelar_reserva/<int:reserva_id>')
 def cancelar_reserva(reserva_id):
@@ -1059,11 +828,10 @@ def cancelar_reserva(reserva_id):
         conn.commit()
         flash('Reserva cancelada com sucesso!', 'success')
         logging.info(f"Reserva {reserva_id} cancelada pelo usuário {session['user_id']}")
-        sync_reservas_to_sheets() # Sincroniza após o cancelamento
-        sync_carros_to_sheets() # Sincroniza status do carro
+        sync_to_sheets() # Sincroniza após o cancelamento
     except Exception as e:
         flash(f'Erro ao cancelar reserva: {e}', 'error')
-        logging.error(f'Erro ao cancelar reserva {reserva_id}: {e}', exc_info=True)
+        logging.error(f'Erro ao cancelar reserva {reserva_id}: {e}')
     finally:
         conn.close()
     return redirect(url_for('minhas_reservas'))
@@ -1071,248 +839,114 @@ def cancelar_reserva(reserva_id):
 @app.route('/admin')
 def admin_panel():
     """Painel administrativo."""
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+
     if not is_admin():
         flash('Acesso negado. Você não tem permissão de administrador.', 'error')
         return redirect(url_for('home'))
     
+    reservas_html = ""
+    usuarios_html = ""
+    carros_html = ""
+
     try:
         reservas = get_reservas()
-        usuarios = get_usuarios()
-        carros = get_all_cars()
-
-        # HTML inline para o painel administrativo
-        html_content = f"""
-        <!DOCTYPE html>
-        <html lang="pt-br">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>JG Minis - Admin</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; }}
-                .container {{ max-width: 1200px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                h1 {{ color: #0056b3; text-align: center; margin-bottom: 30px; }}
-                h2 {{ color: #0056b3; margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 10px; }}
-                .admin-actions {{ display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }}
-                .admin-actions a, .admin-actions button {{ background-color: #007bff; color: white; padding: 10px 15px; border-radius: 5px; text-decoration: none; border: none; cursor: pointer; font-size: 0.9em; }}
-                .admin-actions a:hover, .admin-actions button:hover {{ background-color: #0056b3; }}
-                .admin-actions .sync-btn {{ background-color: #28a745; }}
-                .admin-actions .sync-btn:hover {{ background-color: #218838; }}
-                .admin-actions .backup-btn {{ background-color: #ffc107; color: #333; }}
-                .admin-actions .backup-btn:hover {{ background-color: #e0a800; }}
-                .admin-actions .restore-btn {{ background-color: #dc3545; }}
-                .admin-actions .restore-btn:hover {{ background-color: #c82333; }}
-                table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
-                th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 0.9em; }}
-                th {{ background-color: #f2f2f2; }}
-                .table-actions a, .table-actions button {{ background-color: #007bff; color: white; padding: 5px 8px; border-radius: 3px; text-decoration: none; font-size: 0.8em; margin-right: 5px; border: none; cursor: pointer; }}
-                .table-actions a.edit {{ background-color: #ffc107; color: #333; }}
-                .table-actions a.delete {{ background-color: #dc3545; }}
-                .table-actions a:hover, .table-actions button:hover {{ opacity: 0.9; }}
-                .navbar {{ background-color: #007bff; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }}
-                .navbar a {{ color: white; text-decoration: none; padding: 8px 15px; border-radius: 5px; }}
-                .navbar a:hover {{ background-color: #0056b3; }}
-                .navbar .logo {{ font-weight: bold; font-size: 1.5em; }}
-                .flash-messages {{ list-style: none; padding: 0; margin: 20px 0; }}
-                .flash-messages li {{ padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
-                .flash-messages .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-                .flash-messages .error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
-                .flash-messages .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
-                .admin-link { background-color: #28a745; margin-left: 10px; }
-                .admin-link:hover { background-color: #218838; }
-                .thumbnail-img { width: 50px; height: 30px; object-fit: cover; border-radius: 3px; }
-            </style>
-        </head>
-        <body>
-            <div class="navbar">
-                <a href="/" class="logo">JG Minis</a>
-                <div>
-                    <a href="/home">Home</a>
-                    """
-        if 'user_id' in session:
-            html_content += f"""
-                    <a href="/minhas_reservas">Minhas Reservas</a>
-                    <a href="/logout">Logout ({session.get('user_name', 'Usuário')})</a>
-                    """
-            if is_admin():
-                html_content += """
-                    <a href="/admin" class="admin-link">Admin</a>
-                    """
-        else:
-            html_content += """
-                    <a href="/login">Login</a>
-                    <a href="/registro">Registro</a>
-                    """
-        html_content += """
-                </div>
-            </div>
-            <div class="container">
-                """
-        if '_flashes' in session:
-            html_content += '<ul class="flash-messages">'
-            for category, message in session['_flashes']:
-                html_content += f'<li class="{category}">{message}</li>'
-            session.pop('_flashes', None)
-            html_content += '</ul>'
-
-        html_content += """
-                <h1>Painel Administrativo</h1>
-                <div class="admin-actions">
-                    <a href="/admin/add_carro">Adicionar Novo Carro</a>
-                    <a href="/admin/sync_sheets" class="sync-btn">Sincronizar com Sheets</a>
-                    <a href="/admin/backup_db" class="backup-btn">Backup DB (JSON)</a>
-                    <a href="/admin/restore_backup" class="restore-btn">Restaurar DB (JSON)</a>
-                </div>
-
-                <h2>Carros</h2>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Modelo</th>
-                            <th>Ano</th>
-                            <th>Cor</th>
-                            <th>Placa</th>
-                            <th>Disponível</th>
-                            <th>Preço Diária</th>
-                            <th>Thumbnail</th>
-                            <th>Ações</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        """
-        if carros:
-            for car in carros:
-                thumbnail_src = car['thumbnail_url'] if car['thumbnail_url'] else 'https://via.placeholder.com/50x30?text=N/A'
-                html_content += f"""
-                        <tr>
-                            <td>{car['id']}</td>
-                            <td>{car['modelo']}</td>
-                            <td>{car['ano']}</td>
-                            <td>{car['cor']}</td>
-                            <td>{car['placa']}</td>
-                            <td>{'Sim' if car['disponivel'] else 'Não'}</td>
-                            <td>R$ {car['preco_diaria']:.2f}</td>
-                            <td><img src="{thumbnail_src}" class="thumbnail-img" alt="Thumbnail"></td>
-                            <td class="table-actions">
-                                <a href="/admin/edit_carro/{car['id']}" class="edit">Editar</a>
-                                <a href="/admin/delete_carro/{car['id']}" class="delete" onclick="return confirm('Tem certeza que deseja deletar este carro?');">Deletar</a>
-                            </td>
-                        </tr>
-                """
-        else:
-            html_content += """
-                        <tr><td colspan="9">Nenhum carro cadastrado.</td></tr>
-            """
-        html_content += """
-                    </tbody>
-                </table>
-
-                <h2>Usuários</h2>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Nome</th>
-                            <th>Email</th>
-                            <th>CPF</th>
-                            <th>Telefone</th>
-                            <th>Admin</th>
-                            <th>Ações</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        """
-        if usuarios:
-            for user in usuarios:
-                html_content += f"""
-                        <tr>
-                            <td>{user['id']}</td>
-                            <td>{user['nome']}</td>
-                            <td>{user['email']}</td>
-                            <td>{user['cpf'] or 'N/A'}</td>
-                            <td>{user['telefone'] or 'N/A'}</td>
-                            <td>{'Sim' if user['is_admin'] else 'Não'}</td>
-                            <td class="table-actions">
-                                """
-                if not user['is_admin']:
-                    html_content += f"""
-                                <a href="/admin/promote_admin/{user['id']}">Promover Admin</a>
-                                """
-                html_content += """
-                            </td>
-                        </tr>
-                """
-        else:
-            html_content += """
-                        <tr><td colspan="7">Nenhum usuário cadastrado.</td></tr>
-            """
-        html_content += """
-                    </tbody>
-                </table>
-
-                <h2>Reservas</h2>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Usuário</th>
-                            <th>Carro</th>
-                            <th>Data</th>
-                            <th>Início</th>
-                            <th>Fim</th>
-                            <th>Status</th>
-                            <th>Ações</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-        """
         if reservas:
-            for reserva in reservas:
-                html_content += f"""
-                        <tr>
-                            <td>{reserva['id']}</td>
-                            <td>{reserva['usuario_nome']}</td>
-                            <td>{reserva['carro_modelo']}</td>
-                            <td>{reserva['data_reserva']}</td>
-                            <td>{reserva['hora_inicio']}</td>
-                            <td>{reserva['hora_fim']}</td>
-                            <td>{reserva['status'].capitalize()}</td>
-                            <td class="table-actions">
-                                """
-                if reserva['status'] == 'pendente':
-                    html_content += f"""
-                                <a href="/admin/update_reserva_status/{reserva['id']}/confirmada" class="sync-btn">Confirmar</a>
-                                <a href="/admin/update_reserva_status/{reserva['id']}/cancelada" class="delete">Cancelar</a>
-                                """
-                elif reserva['status'] == 'confirmada':
-                    html_content += f"""
-                                <a href="/admin/update_reserva_status/{reserva['id']}/concluida" class="sync-btn">Concluir</a>
-                                """
-                html_content += """
-                            </td>
-                        </tr>
+            reservas_html += '<h3>Reservas</h3><table class="admin-table"><thead><tr><th>ID</th><th>Usuário</th><th>Carro</th><th>Data</th><th>Início</th><th>Fim</th><th>Status</th><th>Ações</th></tr></thead><tbody>'
+            for r in reservas:
+                reservas_html += f"""
+                <tr>
+                    <td>{r['id']}</td>
+                    <td>{r['usuario_nome']}</td>
+                    <td>{r['carro_modelo']}</td>
+                    <td>{r['data_reserva']}</td>
+                    <td>{r['hora_inicio']}</td>
+                    <td>{r['hora_fim']}</td>
+                    <td>{r['status']}</td>
+                    <td>
+                        <div class="admin-actions">
+                            <a href="/admin/update_reserva_status/{r['id']}/confirmada">Confirmar</a>
+                            <a href="/admin/update_reserva_status/{r['id']}/cancelada">Cancelar</a>
+                        </div>
+                    </td>
+                </tr>
                 """
+            reservas_html += '</tbody></table>'
         else:
-            html_content += """
-                        <tr><td colspan="8">Nenhuma reserva encontrada.</td></tr>
-            """
-        html_content += """
-                    </tbody>
-                </table>
-            </div>
-        </body>
-        </html>
-        """
-        return html_content
+            reservas_html = '<h3>Reservas</h3><p>Nenhuma reserva encontrada.</p>'
+
+        usuarios = get_usuarios()
+        if usuarios:
+            usuarios_html += '<h3>Usuários</h3><table class="admin-table"><thead><tr><th>ID</th><th>Nome</th><th>Email</th><th>CPF</th><th>Telefone</th><th>Admin</th><th>Ações</th></tr></thead><tbody>'
+            for u in usuarios:
+                usuarios_html += f"""
+                <tr>
+                    <td>{u['id']}</td>
+                    <td>{u['nome']}</td>
+                    <td>{u['email']}</td>
+                    <td>{u['cpf'] or ''}</td>
+                    <td>{u['telefone'] or ''}</td>
+                    <td>{'Sim' if u['is_admin'] else 'Não'}</td>
+                    <td>
+                        <div class="admin-actions">
+                            {f'<a href="/admin/promote_admin/{u["id"]}">Promover a Admin</a>' if not u['is_admin'] else ''}
+                        </div>
+                    </td>
+                </tr>
+                """
+            usuarios_html += '</tbody></table>'
+        else:
+            usuarios_html = '<h3>Usuários</h3><p>Nenhum usuário encontrado.</p>'
+
+        carros = get_all_cars()
+        if carros:
+            carros_html += '<h3>Carros</h3><table class="admin-table"><thead><tr><th>ID</th><th>Modelo</th><th>Placa</th><th>Disponível</th><th>Preço</th><th>Thumbnail</th><th>Ações</th></tr></thead><tbody>'
+            for c in carros:
+                carros_html += f"""
+                <tr>
+                    <td>{c['id']}</td>
+                    <td>{c['modelo']} ({c['ano']})</td>
+                    <td>{c['placa']}</td>
+                    <td>{'Sim' if c['disponivel'] else 'Não'}</td>
+                    <td>R$ {c['preco_diaria']:.2f}</td>
+                    <td>{f'<img src="{c["thumbnail_url"]}" alt="Thumb" style="width:50px;height:auto;">' if c['thumbnail_url'] else 'N/A'}</td>
+                    <td>
+                        <div class="admin-actions">
+                            <a href="/admin/edit_carro/{c['id']}">Editar</a>
+                            <a href="/admin/delete_carro/{c['id']}" onclick="return confirm('Tem certeza que deseja deletar este carro?');">Deletar</a>
+                        </div>
+                    </td>
+                </tr>
+                """
+            carros_html += '</tbody></table>'
+        else:
+            carros_html = '<h3>Carros</h3><p>Nenhum carro encontrado.</p>'
+
     except Exception as e:
-        flash('Erro ao carregar o painel administrativo.', 'error')
-        logging.error(f'Erro ao carregar painel admin: {e}', exc_info=True)
-        return redirect(url_for('home'))
+        logging.error(f"Erro ao carregar painel admin: {e}")
+        flash('Erro ao carregar dados do painel administrativo.', 'error')
+        reservas_html = usuarios_html = carros_html = '<p>Erro ao carregar dados.</p>'
+    
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Painel Administrativo</h2>
+        <p><a href="/admin/add_carro" class="button">Adicionar Novo Carro</a></p>
+        <p><a href="/admin/sync_sheets" class="button">Sincronizar com Google Sheets</a></p>
+        <p><a href="/admin/backup_db" class="button">Fazer Backup DB (JSON)</a></p>
+        <p><a href="/admin/restore_backup" class="button">Restaurar DB de Backup (JSON)</a></p>
+        {reservas_html}
+        {usuarios_html}
+        {carros_html}
+    {BASE_HTML_END}
+    """
 
 @app.route('/admin/add_carro', methods=['GET', 'POST'])
 def admin_add_carro():
     """Adiciona um novo carro (apenas admin)."""
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+
     if not is_admin():
         flash('Acesso negado.', 'error')
         return redirect(url_for('home'))
@@ -1338,7 +972,7 @@ def admin_add_carro():
             conn.close()
             flash('Carro adicionado com sucesso!', 'success')
             logging.info(f'Carro adicionado: {modelo} ({placa})')
-            sync_carros_to_sheets() # Sincroniza após adicionar carro
+            sync_to_sheets() # Sincroniza após adicionar carro
             return redirect(url_for('admin_panel'))
         except sqlite3.IntegrityError:
             flash('Placa já cadastrada. Verifique os dados.', 'error')
@@ -1346,67 +980,47 @@ def admin_add_carro():
             flash('Preço diária inválido. Use um número.', 'error')
         except Exception as e:
             flash(f'Erro ao adicionar carro: {e}', 'error')
-            logging.error(f'Erro ao adicionar carro: {e}', exc_info=True)
+            logging.error(f'Erro ao adicionar carro: {e}')
     
-    # HTML inline para a página de adicionar carro
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>JG Minis - Adicionar Carro</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
-            .form-container {{ background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); width: 100%; max-width: 500px; }}
-            h1 {{ color: #0056b3; text-align: center; margin-bottom: 20px; }}
-            label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-            input[type="text"], input[type="number"] {{ width: calc(100% - 22px); padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; }}
-            button {{ width: 100%; padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }}
-            button:hover {{ background-color: #0056b3; }}
-            .flash-messages {{ list-style: none; padding: 0; margin: 0 0 15px 0; }}
-            .flash-messages li {{ padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
-            .flash-messages .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-            .flash-messages .error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
-            .flash-messages .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
-        </style>
-    </head>
-    <body>
-        <div class="form-container">
-            <h1>Adicionar Novo Carro</h1>
-            """
-    if '_flashes' in session:
-        html_content += '<ul class="flash-messages">'
-        for category, message in session['_flashes']:
-            html_content += f'<li class="{category}">{message}</li>'
-        session.pop('_flashes', None)
-        html_content += '</ul>'
-
-    html_content += """
-            <form method="POST">
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Adicionar Novo Carro</h2>
+        <form method="POST" action="/admin/add_carro">
+            <div class="form-group">
                 <label for="modelo">Modelo:</label>
                 <input type="text" id="modelo" name="modelo" required>
+            </div>
+            <div class="form-group">
                 <label for="ano">Ano:</label>
                 <input type="number" id="ano" name="ano" required>
+            </div>
+            <div class="form-group">
                 <label for="cor">Cor:</label>
                 <input type="text" id="cor" name="cor" required>
+            </div>
+            <div class="form-group">
                 <label for="placa">Placa:</label>
                 <input type="text" id="placa" name="placa" required>
-                <label for="preco_diaria">Preço por Diária:</label>
-                <input type="number" id="preco_diaria" name="preco_diaria" step="0.01" required>
+            </div>
+            <div class="form-group">
+                <label for="preco_diaria">Preço Diária:</label>
+                <input type="number" step="0.01" id="preco_diaria" name="preco_diaria" required>
+            </div>
+            <div class="form-group">
                 <label for="thumbnail_url">URL da Miniatura (opcional):</label>
                 <input type="text" id="thumbnail_url" name="thumbnail_url">
-                <button type="submit">Adicionar Carro</button>
-            </form>
-        </div>
-    </body>
-    </html>
+            </div>
+            <input type="submit" value="Adicionar Carro">
+        </form>
+    {BASE_HTML_END}
     """
-    return html_content
 
 @app.route('/admin/edit_carro/<int:car_id>', methods=['GET', 'POST'])
 def admin_edit_carro(car_id):
     """Edita um carro existente (apenas admin)."""
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+
     if not is_admin():
         flash('Acesso negado.', 'error')
         return redirect(url_for('home'))
@@ -1438,7 +1052,7 @@ def admin_edit_carro(car_id):
             conn.close()
             flash('Carro atualizado com sucesso!', 'success')
             logging.info(f'Carro {car_id} atualizado: {modelo} ({placa})')
-            sync_carros_to_sheets() # Sincroniza após editar carro
+            sync_to_sheets() # Sincroniza após editar carro
             return redirect(url_for('admin_panel'))
         except sqlite3.IntegrityError:
             flash('Placa já cadastrada para outro carro. Verifique os dados.', 'error')
@@ -1446,68 +1060,44 @@ def admin_edit_carro(car_id):
             flash('Preço diária inválido. Use um número.', 'error')
         except Exception as e:
             flash(f'Erro ao editar carro: {e}', 'error')
-            logging.error(f'Erro ao editar carro {car_id}: {e}', exc_info=True)
+            logging.error(f'Erro ao editar carro {car_id}: {e}')
     
-    # HTML inline para a página de editar carro
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>JG Minis - Editar Carro</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
-            .form-container {{ background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); width: 100%; max-width: 500px; }}
-            h1 {{ color: #0056b3; text-align: center; margin-bottom: 20px; }}
-            label {{ display: block; margin-bottom: 5px; font-weight: bold; }}
-            input[type="text"], input[type="number"] {{ width: calc(100% - 22px); padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; }}
-            input[type="checkbox"] {{ margin-right: 10px; }}
-            button {{ width: 100%; padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }}
-            button:hover {{ background-color: #0056b3; }}
-            .flash-messages {{ list-style: none; padding: 0; margin: 0 0 15px 0; }}
-            .flash-messages li {{ padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
-            .flash-messages .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-            .flash-messages .error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
-            .flash-messages .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
-        </style>
-    </head>
-    <body>
-        <div class="form-container">
-            <h1>Editar Carro</h1>
-            """
-    if '_flashes' in session:
-        html_content += '<ul class="flash-messages">'
-        for category, message in session['_flashes']:
-            html_content += f'<li class="{category}">{message}</li>'
-        session.pop('_flashes', None)
-        html_content += '</ul>'
-
-    html_content += f"""
-            <form method="POST">
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Editar Carro: {car['modelo']}</h2>
+        <form method="POST" action="/admin/edit_carro/{car['id']}">
+            <div class="form-group">
                 <label for="modelo">Modelo:</label>
                 <input type="text" id="modelo" name="modelo" value="{car['modelo']}" required>
+            </div>
+            <div class="form-group">
                 <label for="ano">Ano:</label>
                 <input type="number" id="ano" name="ano" value="{car['ano']}" required>
+            </div>
+            <div class="form-group">
                 <label for="cor">Cor:</label>
                 <input type="text" id="cor" name="cor" value="{car['cor']}" required>
+            </div>
+            <div class="form-group">
                 <label for="placa">Placa:</label>
                 <input type="text" id="placa" name="placa" value="{car['placa']}" required>
-                <label for="preco_diaria">Preço por Diária:</label>
-                <input type="number" id="preco_diaria" name="preco_diaria" step="0.01" value="{car['preco_diaria']}" required>
+            </div>
+            <div class="form-group">
+                <label for="preco_diaria">Preço Diária:</label>
+                <input type="number" step="0.01" id="preco_diaria" name="preco_diaria" value="{car['preco_diaria']}" required>
+            </div>
+            <div class="form-group">
                 <label for="thumbnail_url">URL da Miniatura (opcional):</label>
                 <input type="text" id="thumbnail_url" name="thumbnail_url" value="{car['thumbnail_url'] or ''}">
-                <label>
-                    <input type="checkbox" id="disponivel" name="disponivel" {'checked' if car['disponivel'] else ''}>
-                    Disponível
-                </label>
-                <button type="submit">Atualizar Carro</button>
-            </form>
-        </div>
-    </body>
-    </html>
+            </div>
+            <div class="form-group">
+                <input type="checkbox" id="disponivel" name="disponivel" {'checked' if car['disponivel'] else ''}>
+                <label for="disponivel">Disponível</label>
+            </div>
+            <input type="submit" value="Atualizar Carro">
+        </form>
+    {BASE_HTML_END}
     """
-    return html_content
 
 @app.route('/admin/delete_carro/<int:car_id>')
 def admin_delete_carro(car_id):
@@ -1528,10 +1118,10 @@ def admin_delete_carro(car_id):
         conn.commit()
         flash('Carro deletado com sucesso!', 'success')
         logging.info(f'Carro {car_id} deletado.')
-        sync_carros_to_sheets() # Sincroniza após deletar carro
+        sync_to_sheets() # Sincroniza após deletar carro
     except Exception as e:
         flash(f'Erro ao deletar carro: {e}', 'error')
-        logging.error(f'Erro ao deletar carro {car_id}: {e}', exc_info=True)
+        logging.error(f'Erro ao deletar carro {car_id}: {e}')
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -1549,10 +1139,10 @@ def admin_update_reserva_status(reserva_id, status):
         conn.commit()
         flash(f'Status da reserva {reserva_id} atualizado para "{status}" com sucesso!', 'success')
         logging.info(f'Reserva {reserva_id} status atualizado para: {status}')
-        sync_reservas_to_sheets() # Sincroniza após atualizar status
+        sync_to_sheets() # Sincroniza após atualizar status
     except Exception as e:
         flash(f'Erro ao atualizar status da reserva: {e}', 'error')
-        logging.error(f'Erro ao atualizar status da reserva: {e}', exc_info=True)
+        logging.error(f'Erro ao atualizar status da reserva {reserva_id}: {e}')
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -1570,10 +1160,10 @@ def admin_promote_admin(user_id):
         conn.commit()
         flash(f'Usuário {user_id} promovido a administrador com sucesso!', 'success')
         logging.info(f'Usuário {user_id} promovido a admin.')
-        sync_usuarios_to_sheets() # Sincroniza após promover admin
+        sync_to_sheets() # Sincroniza após promover admin
     except Exception as e:
         flash(f'Erro ao promover usuário a admin: {e}', 'error')
-        logging.error(f'Erro ao promover usuário {user_id} a admin: {e}', exc_info=True)
+        logging.error(f'Erro ao promover usuário {user_id} a admin: {e}')
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -1590,14 +1180,12 @@ def admin_sync_sheets():
         return redirect(url_for('admin_panel'))
 
     try:
-        sync_reservas_to_sheets()
-        sync_usuarios_to_sheets()
-        sync_carros_to_sheets()
+        sync_to_sheets()
         flash('Dados sincronizados com o Google Sheets com sucesso!', 'success')
         logging.info('Todas as abas do Google Sheets sincronizadas.')
     except Exception as e:
         flash(f'Erro geral ao sincronizar com Google Sheets: {e}', 'error')
-        logging.error(f'Erro geral ao sincronizar com Google Sheets: {e}', exc_info=True)
+        logging.error(f'Erro geral ao sincronizar com Google Sheets: {e}')
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin/backup_db')
@@ -1641,7 +1229,7 @@ def admin_backup_db():
         return send_file(buffer, as_attachment=True, download_name=f'jgminis_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json', mimetype='application/json')
     except Exception as e:
         flash(f'Erro ao gerar backup do banco de dados: {e}', 'error')
-        logging.error(f'Erro ao gerar backup do DB: {e}', exc_info=True)
+        logging.error(f'Erro ao gerar backup do DB: {e}')
     finally:
         conn.close()
     return redirect(url_for('admin_panel'))
@@ -1649,6 +1237,9 @@ def admin_backup_db():
 @app.route('/admin/restore_backup', methods=['GET', 'POST'])
 def admin_restore_backup():
     """Restaura o banco de dados a partir de um arquivo JSON de backup (apenas admin)."""
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+
     if not is_admin():
         flash('Acesso negado.', 'error')
         return redirect(url_for('home'))
@@ -1706,96 +1297,48 @@ def admin_restore_backup():
                 conn.commit()
                 flash('Backup restaurado com sucesso!', 'success')
                 logging.info('Backup restaurado com sucesso.')
-                # Sincroniza com Sheets após a restauração para refletir os dados
-                sync_reservas_to_sheets()
-                sync_usuarios_to_sheets()
-                sync_carros_to_sheets()
-
+                sync_to_sheets() # Sincroniza para Sheets após restauração
             except json.JSONDecodeError:
                 flash('Arquivo de backup inválido: não é um JSON válido.', 'error')
-                logging.error('Erro: Arquivo de backup inválido (JSONDecodeError).', exc_info=True)
+                logging.error('Erro: Arquivo de backup inválido (JSONDecodeError).')
             except KeyError as ke:
                 flash(f'Arquivo de backup inválido: chave ausente - {ke}.', 'error')
-                logging.error(f'Erro: Arquivo de backup inválido (KeyError: {ke}).', exc_info=True)
+                logging.error(f'Erro: Arquivo de backup inválido (KeyError: {ke}).')
             except Exception as e:
                 flash(f'Erro ao restaurar backup: {e}', 'error')
-                logging.error(f'Erro ao restaurar backup: {e}', exc_info=True)
+                logging.error(f'Erro ao restaurar backup: {e}')
             finally:
                 conn.close()
         else:
             flash('Por favor, selecione um arquivo JSON válido.', 'error')
     
-    # HTML inline para a página de restaurar backup
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>JG Minis - Restaurar Backup</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; color: #333; display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
-            .form-container {{ background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); width: 100%; max-width: 500px; }}
-            h1 {{ color: #0056b3; text-align: center; margin-bottom: 20px; }}
-            input[type="file"] {{ width: calc(100% - 22px); padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; }}
-            button {{ width: 100%; padding: 10px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }}
-            button:hover {{ background-color: #0056b3; }}
-            .flash-messages {{ list-style: none; padding: 0; margin: 0 0 15px 0; }}
-            .flash-messages li {{ padding: 10px; margin-bottom: 10px; border-radius: 5px; }}
-            .flash-messages .success {{ background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }}
-            .flash-messages .error {{ background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }}
-            .flash-messages .info {{ background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }}
-        </style>
-    </head>
-    <body>
-        <div class="form-container">
-            <h1>Restaurar Backup do Banco de Dados</h1>
-            """
-    if '_flashes' in session:
-        html_content += '<ul class="flash-messages">'
-        for category, message in session['_flashes']:
-            html_content += f'<li class="{category}">{message}</li>'
-        session.pop('_flashes', None)
-        html_content += '</ul>'
-
-    html_content += """
-            <form method="POST" enctype="multipart/form-data">
-                <label for="backup_file">Selecione o arquivo JSON de backup:</label>
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>Restaurar Banco de Dados</h2>
+        <form method="POST" action="/admin/restore_backup" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="backup_file">Arquivo de Backup (JSON):</label>
                 <input type="file" id="backup_file" name="backup_file" accept=".json" required>
-                <button type="submit">Restaurar</button>
-            </form>
-        </div>
-    </body>
-    </html>
+            </div>
+            <input type="submit" value="Restaurar Backup">
+        </form>
+        <p><strong>Atenção:</strong> A restauração apagará todos os dados atuais do banco de dados e os substituirá pelos dados do arquivo de backup.</p>
+    {BASE_HTML_END}
     """
-    return html_content
 
 # --- Tratamento de Erros ---
 @app.errorhandler(404)
 def page_not_found(e):
     """Trata erros 404 (Página não encontrada)."""
     logging.warning(f"404 Not Found: {request.url}")
-    return """
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>404 - Página Não Encontrada</title>
-        <style>
-            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f4f4f4; color: #333; }
-            h1 { color: #dc3545; }
-            p { font-size: 1.1em; }
-            a { color: #007bff; text-decoration: none; }
-            a:hover { text-decoration: underline; }
-        </style>
-    </head>
-    <body>
-        <h1>404 - Página Não Encontrada</h1>
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>404 - Página Não Encontrada</h2>
         <p>A página que você está procurando não existe.</p>
-        <p><a href="/">Voltar para a página inicial</a></p>
-    </body>
-    </html>
+        <p><a href="/">Voltar para a Home</a></p>
+    {BASE_HTML_END}
     """, 404
 
 @app.errorhandler(500)
@@ -1803,27 +1346,14 @@ def internal_server_error(e):
     """Trata erros 500 (Erro interno do servidor)."""
     logging.error(f"500 Internal Server Error: {e}", exc_info=True)
     flash('Ocorreu um erro inesperado no servidor. Por favor, tente novamente mais tarde.', 'error')
-    return """
-    <!DOCTYPE html>
-    <html lang="pt-br">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>500 - Erro Interno do Servidor</title>
-        <style>
-            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f4f4f4; color: #333; }
-            h1 { color: #dc3545; }
-            p { font-size: 1.1em; }
-            a { color: #007bff; text-decoration: none; }
-            a:hover { text-decoration: underline; }
-        </style>
-    </head>
-    <body>
-        <h1>500 - Erro Interno do Servidor</h1>
+    nav_auth_link, admin_link = get_nav_links()
+    flash_messages = get_flash_messages()
+    return f"""
+    {BASE_HTML_START.format(nav_auth_link=nav_auth_link, admin_link=admin_link, flash_messages=flash_messages)}
+        <h2>500 - Erro Interno do Servidor</h2>
         <p>Ocorreu um erro inesperado. Nossa equipe já foi notificada.</p>
-        <p><a href="/">Voltar para a página inicial</a></p>
-    </body>
-    </html>
+        <p><a href="/">Voltar para a Home</a></p>
+    {BASE_HTML_END}
     """, 500
 
 # O Gunicorn (servidor de produção) irá chamar a instância 'app' diretamente.
