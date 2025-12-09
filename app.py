@@ -9,18 +9,15 @@ import gspread
 from google.oauth2.service_account import Credentials
 import re
 
-# Configuração de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Variáveis de ambiente e configurações
-# LOGO_URL: Link estável para o logo (Imgur)
-LOGO_URL = os.environ.get('LOGO_URL', 'https://i.imgur.com/5zQ8Z0l.png')  # Placeholder stable 150x50 azul com texto "JG MINIS"
+# Configurações do ambiente
+LOGO_URL = os.environ.get('LOGO_URL', 'https://i.imgur.com/Yp1OiWB.jpeg')  # URL do logo customizado
 GOOGLE_SHEETS_CREDENTIALS = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'jgminis_v4_secret_2025_dev_key_fallback')
 DATABASE = os.environ.get('DATABASE', '/tmp/jgminis.db')
 
-# Inicialização do Flask e Bcrypt
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 bcrypt = Bcrypt(app)
@@ -30,7 +27,7 @@ gc = None
 if GOOGLE_SHEETS_CREDENTIALS:
     try:
         creds_dict = json.loads(GOOGLE_SHEETS_CREDENTIALS)
-        # Escopos necessários para Sheets e Drive API
+        # Escopos necessários para Google Sheets e Google Drive API
         scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         gc = gspread.authorize(creds)
@@ -47,18 +44,16 @@ def is_valid_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# Função para inicializar o banco de dados SQLite
+# Inicialização do banco de dados SQLite
 def init_db():
     conn = sqlite3.connect(DATABASE)
     c = conn.cursor()
-    # Cria tabela de usuários
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   email TEXT UNIQUE NOT NULL,
                   password TEXT NOT NULL,
                   role TEXT DEFAULT 'user',
                   data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # Cria tabela de reservas
     c.execute('''CREATE TABLE IF NOT EXISTS reservations
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER NOT NULL,
@@ -79,34 +74,33 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Executa a inicialização do DB ao iniciar o app
 init_db()
 
-# Função para carregar thumbnails da planilha "BASE DE DADOS JG"
+# Função para carregar miniaturas da planilha Google Sheets
 def load_thumbnails():
     thumbnails = []
     if gc:
         try:
-            # Abre a planilha pelo nome
+            # Abre a planilha pelo nome exato
             sheet = gc.open("BASE DE DADOS JG").sheet1
             records = sheet.get_all_records()  # Pega todas as linhas como dicionários
             if not records:
                 raise Exception("Planilha vazia - adicione dados nas linhas 2+")
             
-            # Processa os primeiros 6 registros (pulando o cabeçalho)
-            for record in records[:6]:
-                # Mapeamento das colunas da planilha para os campos do app
+            # Limita a carregar até 12 itens (linhas 2 a 13) para exibição na home
+            # Para carregar todos, mude records[1:13] para records[1:]
+            for record in records[1:13]:
                 service = record.get('NOME DA MINIATURA', 'Miniatura Desconhecida')
                 marca = record.get('MARCA/FABRICANTE', '')
                 obs = record.get('OBSERVAÇÕES', '')
                 description = f"{marca} - {obs}".strip(' - ')
-                thumbnail_url = record.get('IMAGEM', LOGO_URL)
+                thumbnail_url = record.get('IMAGEM', LOGO_URL) # Fallback para LOGO_URL se IMAGEM vazia
                 
                 price_raw = record.get('VALOR', '')
                 # Converte o valor para string antes de aplicar replace, para lidar com int/float
                 price_str = str(price_raw) if price_raw is not None else ''
                 price = price_str.replace('R$ ', '').replace(',', '.') if price_str else '0'
-
+                
                 thumbnails.append({
                     'service': service,
                     'description': description or 'Descrição disponível',
@@ -115,19 +109,19 @@ def load_thumbnails():
                 })
             logger.info(f"Carregados {len(thumbnails)} thumbnails da planilha")
         except gspread.SpreadsheetNotFound:
-            logger.error("Erro ao carregar planilha: Planilha não encontrada - verifique nome/ID")
-            thumbnails = [{'service': 'Erro: Planilha não encontrada', 'description': 'Verifique o nome ou ID da planilha', 'thumbnail_url': LOGO_URL, 'price': '0'}]
+            logger.error("Planilha não encontrada - verifique nome/ID")
+            thumbnails = [{'service': 'Erro: Planilha não encontrada', 'description': 'Use ID correto', 'thumbnail_url': LOGO_URL, 'price': '0'}]
         except gspread.exceptions.WorksheetNotFound:
-            logger.error("Erro ao carregar planilha: Aba 'sheet1' não encontrada")
-            thumbnails = [{'service': 'Erro: Aba sheet1 não encontrada', 'description': 'Crie a aba padrão "sheet1" na planilha', 'thumbnail_url': LOGO_URL, 'price': '0'}]
+            logger.error("Aba não encontrada")
+            thumbnails = [{'service': 'Erro: Aba sheet1 não encontrada', 'description': 'Crie aba padrão', 'thumbnail_url': LOGO_URL, 'price': '0'}]
         except gspread.exceptions.APIError as e:
-            logger.error(f"Erro API Google (permissão/acesso): {e}")
-            thumbnails = [{'service': 'Erro API: Permissão negada', 'description': 'Verifique compartilhamento Editor e APIs ativadas', 'thumbnail_url': LOGO_URL, 'price': '0'}]
+            logger.error(f"Erro API Google: {e}")
+            thumbnails = [{'service': 'Erro API: Permissão negada', 'description': 'Verifique compartilhamento Editor', 'thumbnail_url': LOGO_URL, 'price': '0'}]
         except Exception as e:
             logger.error(f"Erro inesperado ao carregar planilha: {e}")
             thumbnails = [{'service': 'Fallback', 'description': 'Serviço em manutenção. Contate-nos!', 'thumbnail_url': LOGO_URL, 'price': '0'}]
     else:
-        thumbnails = [{'service': 'Sem Integração Sheets', 'description': 'Configure GOOGLE_SHEETS_CREDENTIALS para ver os serviços', 'thumbnail_url': LOGO_URL, 'price': 'Consultar'}]
+        thumbnails = [{'service': 'Sem Sheets', 'description': 'Configure GOOGLE_SHEETS_CREDENTIALS', 'thumbnail_url': LOGO_URL, 'price': 'Consultar'}]
     return thumbnails
 
 # --- Templates HTML Inline ---
@@ -141,7 +135,7 @@ INDEX_HTML = '''
     <title>JG MINIS v4.2 - Serviços</title>
     <style>
         body { font-family: 'Arial', sans-serif; margin: 0; padding: 20px; background: #f8f9fa; color: #333; }
-        header { text-align: center; padding: 20px; background: #007bff; color: white; }
+        header { text-align: center; padding: 20px; background: #004085; color: white; } /* Azul mais escuro */
         img.logo { width: 150px; height: auto; margin: 10px; }
         .thumbnails { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; padding: 20px; }
         .thumbnail { background: white; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); padding: 15px; text-align: center; transition: transform 0.2s; }
@@ -350,9 +344,7 @@ RESERVAR_HTML = '''
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
-                <div class="flash flash-{{ 'success' if category == 'success' else 'error' }}">
-                    {{ message }}
-                </div>
+                <div class="flash flash-{{ 'success' if category == 'success' else 'error' }}">{{ message }}</div>
                 {% endfor %}
             {% endif %}
         {% endwith %}
@@ -658,12 +650,12 @@ def logout():
     flash('Logout realizado com sucesso!', 'success')
     return redirect(url_for('index'))
 
-# Rota para favicon.ico para evitar erros 404 no console do navegador
+# Rota para favicon para evitar erros 404 no console do navegador
 @app.route('/favicon.ico')
 def favicon():
-    return '', 204 # Retorna um status 204 (No Content)
+    return '', 204
 
-# --- Error Handlers ---
+# --- Handlers de Erro ---
 
 @app.errorhandler(404)
 def not_found_error(error):
@@ -674,7 +666,8 @@ def internal_error(error):
     logger.error(f"Erro interno 500: {error}")
     return render_template_string('<h1>500 - Erro Interno</h1><p>Algo deu errado. Tente novamente.</p><a href="/">Home</a>'), 500
 
-# Bloco principal de execução
+# --- Bloco de Execução Principal ---
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     host = '0.0.0.0'
